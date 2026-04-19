@@ -63,7 +63,9 @@ def compute_exploitability(vuln: Dict[str, Any], guidance: AviatorGuidance, chan
     score += min(severity_rank(vuln["severity"]) / 5.0, 1.0) * 0.35
 
     target_files = {normalize_repo_path(file_change.filename) for file_change in guidance.file_changes}
-    if target_files & set(changed_files):
+    if changed_files and target_files & set(changed_files):
+        score += 0.20
+    elif not changed_files and target_files:
         score += 0.20
 
     if vuln.get("line"):
@@ -259,16 +261,19 @@ def run() -> None:
     repo_root = Path(os.environ.get("GITHUB_WORKSPACE") or Path(__file__).resolve().parents[2]).resolve()
     repo = os.environ["GITHUB_REPOSITORY"]
     token = os.environ["GITHUB_TOKEN"]
-    pr_number = int(os.environ["PR_NUMBER"])
-    base_branch = os.environ.get("GITHUB_BASE_REF", "").strip()
-    if not base_branch:
+    pr_number_raw = os.environ.get("PR_NUMBER", "").strip()
+    pr_number = int(pr_number_raw) if pr_number_raw else None
+    base_branch = os.environ.get("GITHUB_BASE_REF", "").strip() or os.environ.get("GITHUB_REF_NAME", "").strip()
+    if not base_branch and pr_number is not None:
         pull_request = github_pull_request(repo, token, pr_number)
         base_branch = pull_request.get("base", {}).get("ref") or "master"
+    elif not base_branch:
+        base_branch = "master"
 
     client = FoDAviatorClient.from_env()
     raw_vulns = client.list_vulnerabilities(only_guidance_available=True).get("items", [])
-    changed_files = github_changed_files(repo, token, pr_number)
-    gate = QualityGate()
+    changed_files = github_changed_files(repo, token, pr_number) if pr_number is not None else []
+    gate = QualityGate(require_changed_file=bool(changed_files))
 
     decisions: List[Dict[str, Any]] = []
 

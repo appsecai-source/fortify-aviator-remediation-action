@@ -50,9 +50,10 @@ python fortify_aviator_remediation/app/remediation_engine.py
 
 The combined workflow:
 - runs FoD scans on `push` to `master` and `dev`
-- runs FoD scans plus Aviator remediation on `pull_request` for `master` and `dev`
-- supports manual `workflow_dispatch`; supply a PR number if you want remediation to run
+- runs FoD scans plus Aviator remediation on `push` to `master` and `dev`
+- still supports `pull_request` events when you want PR comments from the Fortify action
+- supports manual `workflow_dispatch`; supply a branch if you want to override the selected branch
 - uses the numeric FoD release id for both scanning and remediation
 - skips fork-based PRs because the workflow relies on repository credentials
-- limits staged files to the files Aviator actually changed
+- uses PR file scope when a PR exists, otherwise it can remediate against the checked-out branch
 - restores only touched files if patch application fails
