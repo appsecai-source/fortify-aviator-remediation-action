@@ -49,6 +49,15 @@ def github_changed_files(repo: str, token: str, pr_number: int) -> List[str]:
     return changed
 
 
+def github_pull_request(repo: str, token: str, pr_number: int) -> Dict[str, Any]:
+    owner, name = repo.split("/", 1)
+    url = f"https://api.github.com/repos/{owner}/{name}/pulls/{pr_number}"
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
+    response = requests.get(url, headers=headers, timeout=60)
+    response.raise_for_status()
+    return response.json()
+
+
 def compute_exploitability(vuln: Dict[str, Any], guidance: AviatorGuidance, changed_files: Sequence[str]) -> float:
     score = 0.0
     score += min(severity_rank(vuln["severity"]) / 5.0, 1.0) * 0.35
@@ -250,8 +259,11 @@ def run() -> None:
     repo_root = Path(os.environ.get("GITHUB_WORKSPACE") or Path(__file__).resolve().parents[2]).resolve()
     repo = os.environ["GITHUB_REPOSITORY"]
     token = os.environ["GITHUB_TOKEN"]
-    base_branch = os.environ.get("GITHUB_BASE_REF", "master")
     pr_number = int(os.environ["PR_NUMBER"])
+    base_branch = os.environ.get("GITHUB_BASE_REF", "").strip()
+    if not base_branch:
+        pull_request = github_pull_request(repo, token, pr_number)
+        base_branch = pull_request.get("base", {}).get("ref") or "master"
 
     client = FoDAviatorClient.from_env()
     raw_vulns = client.list_vulnerabilities(only_guidance_available=True).get("items", [])
