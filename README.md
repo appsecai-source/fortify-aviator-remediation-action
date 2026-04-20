@@ -28,6 +28,7 @@ Optional:
 
 - `FOD_TENANT`
 - `FOD_USER`
+  For password grant, use `tenant\username` or combine with `FOD_TENANT`.
 - `FOD_PASSWORD` or `FOD_PAT`
 - repository variable `FOD_URL`
 - repository variable `FOD_BASE_URL`
@@ -58,6 +59,7 @@ The combined workflow:
 - supports manual `workflow_dispatch`; supply a branch if you want to override the selected branch
 - uses the numeric FoD release id for both scanning and remediation
 - requests the FoD OAuth scope `api-tenant` by default for remediation API calls
+- authenticates remediation token requests using the documented FoD form body fields for either `client_credentials` or `password`
 - skips fork-based PRs because the workflow relies on repository credentials
 - uses PR file scope when a PR exists, otherwise it can remediate against the checked-out branch
 - restores only touched files if patch application fails

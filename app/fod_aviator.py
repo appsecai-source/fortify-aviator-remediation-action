@@ -87,16 +87,10 @@ class FoDAviatorClient:
             )
         )
 
-    def _request_token(
-        self,
-        token_url: str,
-        data: Dict[str, str],
-        auth: Optional[tuple[str, str]] = None,
-    ) -> requests.Response:
+    def _request_token(self, token_url: str, data: Dict[str, str]) -> requests.Response:
         return self.session.post(
             token_url,
             data=data,
-            auth=auth,
             timeout=self.config.timeout_seconds,
             verify=self.config.verify_ssl,
         )
@@ -113,7 +107,7 @@ class FoDAviatorClient:
         message = (
             "Fortify on Demand authentication failed. "
             "Verify that you are using a valid FoD API key/secret or FoD user/PAT, "
-            "that the credentials have access to the configured release, and that the requested "
+            "that the remediation job is targeting the FoD API root URL, and that the requested "
             f"OAuth scope '{self.config.oauth_scope}' is allowed."
         )
         try:
@@ -127,63 +121,38 @@ class FoDAviatorClient:
             pass
         raise requests.HTTPError(message, response=response)
 
+    def _qualified_username(self) -> str:
+        username = self.config.user.strip()
+        if not username:
+            return ""
+        if "\\" in username or not self.config.tenant.strip():
+            return username
+        return f"{self.config.tenant.strip()}\\{username}"
+
     def authenticate(self) -> str:
         token_url = f"{self.config.base_url}/oauth/token"
-        common_data = {
-            "scope": self.config.oauth_scope,
-        }
 
         if self.config.client_id and self.config.client_secret:
             data = {
-                "grant_type": "client_credentials",
-                **common_data,
-            }
-            response = self._request_token(
-                token_url=token_url,
-                data=data,
-                auth=(self.config.client_id, self.config.client_secret),
-            )
-            if response.ok:
-                return self._store_access_token(response)
-
-            fallback_data = {
+                "scope": self.config.oauth_scope,
                 "grant_type": "client_credentials",
                 "client_id": self.config.client_id,
                 "client_secret": self.config.client_secret,
-                **common_data,
             }
-            fallback_response = self._request_token(token_url=token_url, data=fallback_data)
-            if fallback_response.ok:
-                return self._store_access_token(fallback_response)
+            response = self._request_token(token_url=token_url, data=data)
+            if response.ok:
+                return self._store_access_token(response)
+            if not (self.config.user and self.config.password):
+                self._raise_auth_error(response)
 
-            if response.status_code not in (400, 401) and fallback_response.status_code not in (400, 401):
-                fallback_response.raise_for_status()
-
-            if self.config.user and self.config.password:
-                password_data = {
-                    "grant_type": "password",
-                    "username": self.config.user,
-                    "password": self.config.password,
-                    **common_data,
-                }
-                if self.config.tenant:
-                    password_data["tenant"] = self.config.tenant
-                password_response = self._request_token(token_url=token_url, data=password_data)
-                if password_response.ok:
-                    return self._store_access_token(password_response)
-                self._raise_auth_error(password_response)
-
-            self._raise_auth_error(fallback_response)
-
-        if self.config.user and self.config.password:
+        qualified_username = self._qualified_username()
+        if qualified_username and self.config.password:
             data = {
+                "scope": self.config.oauth_scope,
                 "grant_type": "password",
-                "username": self.config.user,
+                "username": qualified_username,
                 "password": self.config.password,
-                **common_data,
             }
-            if self.config.tenant:
-                data["tenant"] = self.config.tenant
             response = self._request_token(token_url=token_url, data=data)
             if response.ok:
                 return self._store_access_token(response)
@@ -191,7 +160,8 @@ class FoDAviatorClient:
 
         raise RuntimeError(
             "Missing Fortify on Demand credentials. Set FOD_CLIENT_ID and FOD_CLIENT_SECRET, "
-            "or set FOD_USER and FOD_PASSWORD."
+            "or set FOD_USER and FOD_PASSWORD/FOD_PAT. For password grant, provide FOD_USER as "
+            "'tenant\\\\username' or set FOD_TENANT plus FOD_USER."
         )
 
     def _get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Any:
