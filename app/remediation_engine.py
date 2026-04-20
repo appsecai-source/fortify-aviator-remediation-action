@@ -372,8 +372,39 @@ def generate_file_diff(before_text: str, after_text: str, filename: str) -> str:
     )
 
 
+def configured_git_identity() -> Tuple[str, str]:
+    name = (
+        os.environ.get("GIT_USER_NAME")
+        or os.environ.get("GIT_AUTHOR_NAME")
+        or os.environ.get("GITHUB_ACTOR")
+        or "github-actions[bot]"
+    ).strip()
+    email = (
+        os.environ.get("GIT_USER_EMAIL")
+        or os.environ.get("GIT_AUTHOR_EMAIL")
+        or ""
+    ).strip()
+
+    if not email:
+        if name == "github-actions[bot]":
+            email = "41898282+github-actions[bot]@users.noreply.github.com"
+        elif os.environ.get("GITHUB_ACTOR", "").strip():
+            email = f"{os.environ['GITHUB_ACTOR'].strip()}@users.noreply.github.com"
+        else:
+            email = "fortify-aviator@users.noreply.github.com"
+
+    return name, email
+
+
+def ensure_git_identity(repo_root: Path) -> None:
+    name, email = configured_git_identity()
+    subprocess.run(["git", "config", "user.name", name], cwd=repo_root, check=True)
+    subprocess.run(["git", "config", "user.email", email], cwd=repo_root, check=True)
+
+
 def create_branch_and_commit(repo_root: Path, branch_name: str, commit_message: str, files: Sequence[str]) -> None:
     subprocess.run(["git", "checkout", "-b", branch_name], cwd=repo_root, check=True)
+    ensure_git_identity(repo_root)
     for filename in files:
         subprocess.run(["git", "add", "--", normalize_repo_path(filename)], cwd=repo_root, check=True)
     subprocess.run(["git", "commit", "-m", commit_message], cwd=repo_root, check=True)
