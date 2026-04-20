@@ -213,7 +213,10 @@ class FoDAviatorClient:
             or "Unknown"
         )
         return {
-            "vuln_id": vulnerability.get("vulnId") or vulnerability.get("id") or vulnerability.get("issueId"),
+            # The remediation-guidance endpoint expects the numeric vulnerability id from the
+            # release findings payload, not the GUID-style vulnId field.
+            "vuln_id": vulnerability.get("id") or vulnerability.get("issueId") or vulnerability.get("vulnId"),
+            "vuln_guid": vulnerability.get("vulnId"),
             "instance_id": vulnerability.get("instanceId"),
             "category": vulnerability.get("category") or vulnerability.get("kingdom") or vulnerability.get("issueName"),
             "severity": severity,
@@ -222,8 +225,13 @@ class FoDAviatorClient:
             "cwe": vulnerability.get("cwe") or vulnerability.get("cweId"),
             "confidence": str(confidence),
             "confidence_normalized": normalize_confidence(str(confidence)),
-            "remediation_guidance_available": bool(vulnerability.get("remediationGuidanceAvailable", False)),
-            "scan_type": vulnerability.get("analysisType") or vulnerability.get("scanType"),
+            "remediation_guidance_available": bool(
+                vulnerability.get("aviatorRemediationGuidanceAvailable")
+                if "aviatorRemediationGuidanceAvailable" in vulnerability
+                else vulnerability.get("remediationGuidanceAvailable", False)
+            ),
+            "scan_type": vulnerability.get("analysisType") or vulnerability.get("scanType") or vulnerability.get("scantype"),
+            "fortify_aviator": bool(vulnerability.get("fortifyAviator", False)),
             "analysis": vulnerability.get("analysis"),
             "raw": vulnerability,
         }
