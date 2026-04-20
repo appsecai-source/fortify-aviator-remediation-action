@@ -116,7 +116,7 @@ def quality_gate_check(
         reasons.append(f"confidence gate failed: {confidence}")
 
     if gate.require_guidance_available and guidance is None:
-        reasons.append("guidance unavailable")
+        reasons.append("Remediation Guidance is not available")
 
     if guidance is not None and gate.require_file_changes and not guidance.file_changes:
         reasons.append("no structured FileChanges returned")
@@ -275,7 +275,7 @@ def run() -> None:
         only_guidance_available=True,
         offset=0,
         limit=50,
-        fortify_aviator=False,
+        fortify_aviator=True,
     ).get("items", [])
     changed_files = github_changed_files(repo, token, pr_number) if pr_number is not None else []
     gate = QualityGate(require_changed_file=bool(changed_files))
@@ -292,7 +292,7 @@ def run() -> None:
         passed, reasons, exploitability = quality_gate_check(gate, vuln, guidance, changed_files)
 
         if not guidance:
-            decisions.append(comment_only_summary(vuln, reasons or ["guidance unavailable"]))
+            decisions.append(comment_only_summary(vuln, reasons or ["Remediation Guidance is not available"]))
             continue
 
         if not passed:

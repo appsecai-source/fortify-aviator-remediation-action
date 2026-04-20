@@ -180,29 +180,23 @@ class FoDAviatorClient:
 
     def list_vulnerabilities(
         self,
-        only_guidance_available: bool = True,
+        only_guidance_available: bool = False,
         limit: int = 50,
         offset: int = 0,
-        fortify_aviator: bool = False,
+        fortify_aviator: bool = True,
     ) -> Dict[str, Any]:
         params: Dict[str, Any] = {
             "offset": offset,
             "limit": limit,
             "fortifyAviator": str(fortify_aviator).lower(),
         }
-        payload = self._get(f"/api/v3/releases/{self.config.release_id}/vulnerabilities", params=params)
-        if not only_guidance_available or not isinstance(payload, dict):
-            return payload
-
-        items = payload.get("items", [])
-        if isinstance(items, list):
-            payload["items"] = [item for item in items if item.get("remediationGuidanceAvailable")]
-        return payload
+        # Query FoD vulnerabilities that have been processed by Fortify Aviator.
+        return self._get(f"/api/v3/releases/{self.config.release_id}/vulnerabilities", params=params)
 
     def get_aviator_guidance(self, vuln_id: int) -> Optional[Dict[str, Any]]:
         try:
             return self._get(
-                f"/api/v3/releases/{self.config.release_id}/vulnerabilities/{vuln_id}/aviatorremediation-guidance"
+                f"/api/v3/releases/{self.config.release_id}/vulnerabilities/{vuln_id}/aviator-remediation-guidance"
             )
         except requests.HTTPError as exc:
             if exc.response is not None and exc.response.status_code in (404, 422):
