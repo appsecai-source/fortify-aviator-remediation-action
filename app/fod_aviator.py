@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 import requests
 
@@ -181,17 +181,59 @@ class FoDAviatorClient:
     def list_vulnerabilities(
         self,
         only_guidance_available: bool = False,
-        limit: int = 50,
+        limit: Optional[int] = None,
         offset: int = 0,
         fortify_aviator: bool = True,
+        severity_string: str = "",
     ) -> Dict[str, Any]:
         params: Dict[str, Any] = {
             "offset": offset,
-            "limit": limit,
             "fortifyAviator": str(fortify_aviator).lower(),
         }
+        if limit is not None:
+            params["limit"] = limit
+        if severity_string:
+            params["severityString"] = severity_string
         # Query FoD vulnerabilities that have been processed by Fortify Aviator.
         return self._get(f"/api/v3/releases/{self.config.release_id}/vulnerabilities", params=params)
+
+    def iter_vulnerabilities(
+        self,
+        fortify_aviator: bool = True,
+        severity_strings: Optional[Sequence[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        requested_severities = [severity.strip() for severity in (severity_strings or []) if severity and severity.strip()]
+        if not requested_severities:
+            requested_severities = [""]
+
+        collected: List[Dict[str, Any]] = []
+        seen_ids = set()
+
+        for severity_string in requested_severities:
+            offset = 0
+            total_count: Optional[int] = None
+
+            while total_count is None or offset < total_count:
+                payload = self.list_vulnerabilities(
+                    offset=offset,
+                    fortify_aviator=fortify_aviator,
+                    severity_string=severity_string,
+                )
+                items = payload.get("items", [])
+                total_count = int(payload.get("totalCount") or 0)
+                if not items:
+                    break
+
+                for item in items:
+                    item_id = item.get("id") or item.get("issueId") or item.get("vulnId")
+                    if item_id in seen_ids:
+                        continue
+                    seen_ids.add(item_id)
+                    collected.append(item)
+
+                offset += len(items)
+
+        return collected
 
     def get_aviator_guidance(self, vuln_id: int) -> Optional[Dict[str, Any]]:
         try:

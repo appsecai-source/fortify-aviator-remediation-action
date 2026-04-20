@@ -3,6 +3,7 @@ from __future__ import annotations
 import difflib
 import json
 import os
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,16 +21,179 @@ class PatchApplyError(Exception):
 @dataclass
 class QualityGate:
     min_severity_rank: int = 4
-    allowed_confidence: Tuple[str, ...] = ("high",)
     require_guidance_available: bool = True
     require_file_changes: bool = True
     require_changed_file: bool = True
-    min_exploitability_score: float = 0.70
     allow_multi_file_changes: bool = True
+
+
+VALID_SEVERITY_STRINGS = {
+    "critical": "Critical",
+    "high": "High",
+    "medium": "Medium",
+    "low": "Low",
+}
+FIX_BRANCH_PREFIX = "fortify-aviator-fix-"
+
+
+def load_local_env_file() -> None:
+    env_path = Path(__file__).resolve().parents[1] / ".env"
+    if not env_path.exists():
+        return
+
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip("\"").strip("'")
+        if key:
+            os.environ.setdefault(key, value)
+
+
+def configured_severity_strings() -> List[str]:
+    raw_value = os.environ.get("FOD_SEVERITY_STRINGS", "Critical,High").strip()
+    if not raw_value:
+        return []
+
+    severities: List[str] = []
+    invalid: List[str] = []
+    for token in raw_value.split(","):
+        normalized = token.strip().lower()
+        if not normalized:
+            continue
+        canonical = VALID_SEVERITY_STRINGS.get(normalized)
+        if canonical is None:
+            invalid.append(token.strip())
+            continue
+        if canonical not in severities:
+            severities.append(canonical)
+
+    if invalid:
+        allowed = ", ".join(VALID_SEVERITY_STRINGS.values())
+        raise RuntimeError(f"Unsupported FOD_SEVERITY_STRINGS value(s): {', '.join(invalid)}. Allowed values: {allowed}")
+
+    return severities
 
 
 def normalize_repo_path(value: str) -> str:
     return Path(value).as_posix().lstrip("./")
+
+
+def parse_github_repository(value: str) -> str:
+    remote = value.strip()
+    patterns = (
+        r"^https://github\.com/([^/]+/[^/]+?)(?:\.git)?$",
+        r"^git@github\.com:([^/]+/[^/]+?)(?:\.git)?$",
+        r"^ssh://git@github\.com/([^/]+/[^/]+?)(?:\.git)?$",
+    )
+    for pattern in patterns:
+        match = re.match(pattern, remote)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def git_origin_repository(repo_root: Path) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return ""
+    return parse_github_repository(result.stdout.strip())
+
+
+def git_ref_names(repo_root: Path, ref_prefix: str) -> List[str]:
+    try:
+        result = subprocess.run(
+            ["git", "for-each-ref", "--format=%(refname:short)", ref_prefix],
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return []
+    refs = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if ref_prefix == "refs/remotes/origin":
+        return [ref.removeprefix("origin/") for ref in refs if ref.startswith("origin/")]
+    return refs
+
+
+def git_current_branch(repo_root: Path) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return ""
+    return result.stdout.strip()
+
+
+def choose_default_base_branch(repo_root: Path) -> str:
+    remote_branches = git_ref_names(repo_root, "refs/remotes/origin")
+    local_branches = git_ref_names(repo_root, "refs/heads")
+
+    for candidate in ("main", "master"):
+        if candidate in remote_branches or candidate in local_branches:
+            return candidate
+
+    current_branch = git_current_branch(repo_root)
+    if current_branch and not current_branch.startswith(FIX_BRANCH_PREFIX):
+        return current_branch
+
+    if remote_branches:
+        return remote_branches[0]
+    if local_branches:
+        return local_branches[0]
+    return "main"
+
+
+def resolve_base_branch(repo_root: Path, repo: str, token: str, pr_number: int | None) -> str:
+    candidate = os.environ.get("GITHUB_BASE_REF", "").strip() or os.environ.get("GITHUB_REF_NAME", "").strip()
+    if not candidate and pr_number is not None:
+        pull_request = github_pull_request(repo, token, pr_number)
+        candidate = pull_request.get("base", {}).get("ref", "").strip()
+
+    remote_branches = set(git_ref_names(repo_root, "refs/remotes/origin"))
+    local_branches = set(git_ref_names(repo_root, "refs/heads"))
+    known_branches = remote_branches | local_branches
+
+    if candidate and candidate in known_branches:
+        return candidate
+
+    current_branch = git_current_branch(repo_root)
+    if current_branch and not current_branch.startswith(FIX_BRANCH_PREFIX) and current_branch in known_branches:
+        return current_branch
+
+    return choose_default_base_branch(repo_root)
+
+
+def resolve_github_repository(repo_root: Path) -> str:
+    env_repo = os.environ.get("GITHUB_REPOSITORY", "").strip()
+    remote_repo = git_origin_repository(repo_root)
+
+    # For local runs, prefer the checked-out git remote over a stale .env value.
+    if os.environ.get("GITHUB_ACTIONS", "").strip().lower() != "true" and remote_repo:
+        return remote_repo
+    if env_repo:
+        return env_repo
+    if remote_repo:
+        return remote_repo
+    raise RuntimeError(
+        "Unable to determine GitHub repository. Set GITHUB_REPOSITORY=owner/repo "
+        "or configure an origin remote that points to GitHub."
+    )
 
 
 def github_changed_files(repo: str, token: str, pr_number: int) -> List[str]:
@@ -56,6 +220,23 @@ def github_pull_request(repo: str, token: str, pr_number: int) -> Dict[str, Any]
     response = requests.get(url, headers=headers, timeout=60)
     response.raise_for_status()
     return response.json()
+
+
+def github_find_pull_request(repo: str, token: str, head: str, base: str, state: str = "open") -> Dict[str, Any] | None:
+    owner, name = repo.split("/", 1)
+    url = f"https://api.github.com/repos/{owner}/{name}/pulls"
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
+    response = requests.get(
+        url,
+        headers=headers,
+        params={"state": state, "head": head, "base": base},
+        timeout=60,
+    )
+    response.raise_for_status()
+    pulls = response.json()
+    if pulls:
+        return pulls[0]
+    return None
 
 
 def compute_exploitability(vuln: Dict[str, Any], guidance: AviatorGuidance, changed_files: Sequence[str]) -> float:
@@ -111,10 +292,6 @@ def quality_gate_check(
     if severity_rank(vuln["severity"]) < gate.min_severity_rank:
         reasons.append(f"severity gate failed: {vuln['severity']}")
 
-    confidence = vuln.get("confidence_normalized", "unknown")
-    if confidence not in gate.allowed_confidence:
-        reasons.append(f"confidence gate failed: {confidence}")
-
     if gate.require_guidance_available and guidance is None:
         reasons.append("Remediation Guidance is not available")
 
@@ -129,8 +306,6 @@ def quality_gate_check(
         reasons.append("target files not in PR scope")
 
     exploitability = compute_exploitability(vuln, guidance, changed_files) if guidance else 0.0
-    if exploitability < gate.min_exploitability_score:
-        reasons.append(f"exploitability gate failed: {exploitability}")
 
     return (len(reasons) == 0, reasons, exploitability)
 
@@ -207,14 +382,47 @@ def create_branch_and_commit(repo_root: Path, branch_name: str, commit_message: 
 
 def open_pull_request(repo: str, token: str, head: str, base: str, title: str, body: str) -> Dict[str, Any]:
     owner, name = repo.split("/", 1)
+    qualified_head = head if ":" in head else f"{owner}:{head}"
     url = f"https://api.github.com/repos/{owner}/{name}/pulls"
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
     response = requests.post(
         url,
         headers=headers,
-        json={"title": title, "head": head, "base": base, "body": body},
+        json={"title": title, "head": qualified_head, "base": base, "body": body},
         timeout=60,
     )
+    if response.status_code == 404:
+        raise requests.HTTPError(
+            f"GitHub repository not found or not accessible for PR creation: {repo}. "
+            "Verify GITHUB_REPOSITORY, the origin remote, and that GITHUB_TOKEN has repo access.",
+            response=response,
+        )
+    if response.status_code == 422:
+        detail = ""
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = {}
+
+        message = str(payload.get("message", "")).strip()
+        error_messages: List[str] = []
+        for error in payload.get("errors", []):
+            if isinstance(error, dict):
+                error_messages.append(str(error.get("message") or error.get("code") or "").strip())
+            else:
+                error_messages.append(str(error).strip())
+        detail = " | ".join(part for part in [message, *error_messages] if part)
+
+        if "A pull request already exists for" in detail:
+            existing_pull = github_find_pull_request(repo, token, qualified_head, base, state="open")
+            if existing_pull is not None:
+                existing_pull["_existing"] = True
+                return existing_pull
+
+        raise requests.HTTPError(
+            f"GitHub rejected PR creation for {qualified_head} -> {base}: {detail or 'unprocessable entity'}",
+            response=response,
+        )
     response.raise_for_status()
     return response.json()
 
@@ -258,25 +466,20 @@ def comment_only_summary(vuln: Dict[str, Any], reasons: List[str]) -> Dict[str, 
 
 
 def run() -> None:
+    load_local_env_file()
     repo_root = Path(os.environ.get("GITHUB_WORKSPACE") or Path(__file__).resolve().parents[2]).resolve()
-    repo = os.environ["GITHUB_REPOSITORY"]
+    repo = resolve_github_repository(repo_root)
     token = os.environ["GITHUB_TOKEN"]
     pr_number_raw = os.environ.get("PR_NUMBER", "").strip()
     pr_number = int(pr_number_raw) if pr_number_raw else None
-    base_branch = os.environ.get("GITHUB_BASE_REF", "").strip() or os.environ.get("GITHUB_REF_NAME", "").strip()
-    if not base_branch and pr_number is not None:
-        pull_request = github_pull_request(repo, token, pr_number)
-        base_branch = pull_request.get("base", {}).get("ref") or "master"
-    elif not base_branch:
-        base_branch = "master"
+    base_branch = resolve_base_branch(repo_root, repo, token, pr_number)
 
     client = FoDAviatorClient.from_env()
-    raw_vulns = client.list_vulnerabilities(
-        only_guidance_available=True,
-        offset=0,
-        limit=50,
+    severity_strings = configured_severity_strings()
+    raw_vulns = client.iter_vulnerabilities(
         fortify_aviator=True,
-    ).get("items", [])
+        severity_strings=severity_strings,
+    )
     changed_files = github_changed_files(repo, token, pr_number) if pr_number is not None else []
     gate = QualityGate(require_changed_file=bool(changed_files))
 
@@ -331,7 +534,7 @@ def run() -> None:
         )
         decisions.append(
             {
-                "status": "pr_created",
+                "status": "pr_already_exists" if pull_request.get("_existing") else "pr_created",
                 "vulnerability": vuln["vuln_id"],
                 "files": [normalize_repo_path(filename) for filename in applied_files],
                 "exploitability": exploitability,
