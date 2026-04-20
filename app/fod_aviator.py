@@ -181,19 +181,23 @@ class FoDAviatorClient:
     def list_vulnerabilities(
         self,
         only_guidance_available: bool = True,
-        limit: int = 200,
+        limit: int = 50,
         offset: int = 0,
-        extra_filters: Optional[List[str]] = None,
+        fortify_aviator: bool = False,
     ) -> Dict[str, Any]:
-        filters: List[str] = []
-        if only_guidance_available:
-            filters.append("remediationGuidanceAvailable:true")
-        if extra_filters:
-            filters.extend(extra_filters)
-        params: Dict[str, Any] = {"limit": limit, "offset": offset}
-        if filters:
-            params["filters"] = "+".join(filters)
-        return self._get(f"/api/v3/releases/{self.config.release_id}/vulnerabilities", params=params)
+        params: Dict[str, Any] = {
+            "offset": offset,
+            "limit": limit,
+            "fortifyAviator": str(fortify_aviator).lower(),
+        }
+        payload = self._get(f"/api/v3/releases/{self.config.release_id}/vulnerabilities", params=params)
+        if not only_guidance_available or not isinstance(payload, dict):
+            return payload
+
+        items = payload.get("items", [])
+        if isinstance(items, list):
+            payload["items"] = [item for item in items if item.get("remediationGuidanceAvailable")]
+        return payload
 
     def get_aviator_guidance(self, vuln_id: int) -> Optional[Dict[str, Any]]:
         try:

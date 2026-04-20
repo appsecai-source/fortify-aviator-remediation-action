@@ -271,7 +271,12 @@ def run() -> None:
         base_branch = "master"
 
     client = FoDAviatorClient.from_env()
-    raw_vulns = client.list_vulnerabilities(only_guidance_available=True).get("items", [])
+    raw_vulns = client.list_vulnerabilities(
+        only_guidance_available=True,
+        offset=0,
+        limit=50,
+        fortify_aviator=False,
+    ).get("items", [])
     changed_files = github_changed_files(repo, token, pr_number) if pr_number is not None else []
     gate = QualityGate(require_changed_file=bool(changed_files))
 
