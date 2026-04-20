@@ -20,15 +20,18 @@ It is designed to:
 
 ## Required GitHub repository secrets
 
-- `FOD_CLIENT_ID`
-- `FOD_CLIENT_SECRET`
+- `FOD_CLIENT_ID` and `FOD_CLIENT_SECRET`
+  Preferred for remediation API access.
 - `FOD_RELEASE_ID`
 
 Optional:
 
 - `FOD_TENANT`
+- `FOD_USER`
+- `FOD_PASSWORD` or `FOD_PAT`
 - repository variable `FOD_URL`
 - repository variable `FOD_BASE_URL`
+- repository variable `FOD_OAUTH_SCOPE`
 - repository variable `FOD_VERIFY_SSL`
 
 The workflow uses GitHub's built-in `GITHUB_TOKEN` for branch pushes and PR creation.
@@ -54,6 +57,7 @@ The combined workflow:
 - still supports `pull_request` events when you want PR comments from the Fortify action
 - supports manual `workflow_dispatch`; supply a branch if you want to override the selected branch
 - uses the numeric FoD release id for both scanning and remediation
+- requests the FoD OAuth scope `api-tenant` by default for remediation API calls
 - skips fork-based PRs because the workflow relies on repository credentials
 - uses PR file scope when a PR exists, otherwise it can remediate against the checked-out branch
 - restores only touched files if patch application fails
