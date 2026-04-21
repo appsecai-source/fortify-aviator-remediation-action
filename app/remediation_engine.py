@@ -428,6 +428,30 @@ def open_pull_request(repo: str, token: str, head: str, base: str, title: str, b
             "Verify GITHUB_REPOSITORY, the origin remote, and that GITHUB_TOKEN has repo access.",
             response=response,
         )
+    if response.status_code == 403:
+        detail = ""
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = {}
+
+        message = str(payload.get("message", "")).strip()
+        error_messages: List[str] = []
+        for error in payload.get("errors", []):
+            if isinstance(error, dict):
+                error_messages.append(str(error.get("message") or error.get("code") or "").strip())
+            else:
+                error_messages.append(str(error).strip())
+        detail = " | ".join(part for part in [message, *error_messages] if part)
+
+        raise requests.HTTPError(
+            "GitHub denied PR creation. If you are using the default GITHUB_TOKEN, verify "
+            "the repository setting 'Allow GitHub Actions to create and approve pull requests' "
+            "is enabled under Settings > Actions > General, or provide a PAT in the "
+            "REMEDIATION_GITHUB_TOKEN secret. "
+            f"API response: {detail or 'forbidden'}",
+            response=response,
+        )
     if response.status_code == 422:
         detail = ""
         try:
