@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -15,7 +16,7 @@ from typing import Any, Dict, Iterator, List, Sequence, Tuple
 
 import requests
 
-from fod_aviator import AviatorGuidance, FileRemediation, FoDAviatorClient, severity_rank
+from fod_aviator import AviatorGuidance, FileRemediation, FoDAviatorClient, normalize_severity_label, severity_rank
 from metrics import (
     publish_remediation_metrics_markdown,
     render_remediation_metrics_markdown,
@@ -37,6 +38,7 @@ class QualityGate:
     require_file_changes: bool = True
     require_changed_file: bool = True
     allow_multi_file_changes: bool = True
+    allowed_severities: Tuple[str, ...] = ()
 
 
 VALID_SEVERITY_STRINGS = {
@@ -88,6 +90,15 @@ def configured_severity_strings() -> List[str]:
         raise RuntimeError(f"Unsupported FOD_SEVERITY_STRINGS value(s): {', '.join(invalid)}. Allowed values: {allowed}")
 
     return severities
+
+
+def configured_allowed_severities(severity_strings: Sequence[str]) -> Tuple[str, ...]:
+    allowed = []
+    for severity in severity_strings:
+        normalized = normalize_severity_label(severity).lower()
+        if normalized and normalized not in allowed:
+            allowed.append(normalized)
+    return tuple(allowed)
 
 
 def normalize_repo_path(value: str) -> str:
@@ -360,6 +371,10 @@ def quality_gate_check(
     reasons: List[str] = []
     confidence = remediation_confidence(vuln, guidance)
     auditor_status = vuln.get("auditor_status", "Unknown")
+    normalized_severity = normalize_severity_label(vuln.get("severity") or "Unknown").lower()
+
+    if gate.allowed_severities and normalized_severity not in gate.allowed_severities:
+        reasons.append(f"severity not in configured FOD_SEVERITY_STRINGS: {vuln['severity']}")
 
     if severity_rank(vuln["severity"]) < gate.min_severity_rank:
         reasons.append(f"severity gate failed: {vuln['severity']}")
@@ -463,6 +478,37 @@ def git_diff_for_files(repo_root: Path, files: Sequence[str]) -> List[str]:
         text=True,
     )
     return [result.stdout] if result.stdout.strip() else []
+
+
+def configured_validation_command() -> str:
+    return os.environ.get("REMEDIATION_VALIDATE_COMMAND", "mvn -q -DskipTests compile").strip()
+
+
+def should_validate_remediation(files: Sequence[str]) -> bool:
+    return any(normalize_repo_path(filename).endswith(".java") for filename in files)
+
+
+def validate_remediation_changes(repo_root: Path, files: Sequence[str]) -> None:
+    if not should_validate_remediation(files):
+        return
+
+    command = configured_validation_command()
+    if command.lower() in {"", "0", "false", "off", "none"}:
+        return
+
+    result = subprocess.run(
+        shlex.split(command),
+        cwd=repo_root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        return
+
+    output = "\n".join(part.strip() for part in [result.stdout, result.stderr] if part.strip())
+    detail = truncate_text(output, 4000, "validation output") if output else "No compiler output captured."
+    raise RuntimeError(f"Validation command failed for remediation changes ({command}).\n{detail}")
 
 
 def configured_git_identity() -> Tuple[str, str]:
@@ -909,6 +955,8 @@ def classify_skip_outcome(reasons: Sequence[str], guidance: AviatorGuidance | No
         return "no_fix_suggestion"
     if any("severity gate failed" in reason for reason in lowered_reasons):
         return "severity_filtered_out"
+    if any("severity not in configured fod_severity_strings" in reason for reason in lowered_reasons):
+        return "severity_filtered_out"
     if any("target files not in pr scope" in reason for reason in lowered_reasons):
         return "out_of_scope"
     if any("multi-file changes not allowed" in reason for reason in lowered_reasons):
@@ -928,6 +976,8 @@ def run() -> None:
     client = FoDAviatorClient.from_env()
     raw_severity_strings = os.environ.get("FOD_SEVERITY_STRINGS")
     severity_strings = configured_severity_strings()
+    allowed_severities = configured_allowed_severities(severity_strings)
+    min_severity_rank = min((severity_rank(severity) for severity in severity_strings), default=0)
     severity_source = "env" if raw_severity_strings is not None else "default"
     raw_severity_display = raw_severity_strings if raw_severity_strings is not None else "Critical"
     normalized_severity_display = ",".join(severity_strings) if severity_strings else "(none)"
@@ -940,7 +990,11 @@ def run() -> None:
         severity_strings=severity_strings,
     )
     changed_files = github_changed_files(repo, token, pr_number) if pr_number is not None else []
-    gate = QualityGate(require_changed_file=bool(changed_files))
+    gate = QualityGate(
+        min_severity_rank=min_severity_rank,
+        require_changed_file=bool(changed_files),
+        allowed_severities=allowed_severities,
+    )
 
     decisions: List[Dict[str, Any]] = []
     grouped_candidates: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
@@ -952,6 +1006,27 @@ def run() -> None:
             continue
 
         vuln_id = str(vuln["vuln_id"])
+        normalized_vuln_severity = normalize_severity_label(vuln.get("severity") or "Unknown").lower()
+        if gate.allowed_severities and normalized_vuln_severity not in gate.allowed_severities:
+            decisions.append(
+                comment_only_summary(
+                    vuln,
+                    [f"severity not in configured FOD_SEVERITY_STRINGS: {vuln['severity']}"],
+                )
+            )
+            metrics_records[vuln_id] = {
+                "vulnerability": vuln_id,
+                "severity": str(vuln.get("severity") or "Unknown"),
+                "category": str(vuln.get("category") or "Uncategorized"),
+                "auditor_status": str(vuln.get("auditor_status") or "Unknown"),
+                "guidance_available": False,
+                "structured_fix_available": False,
+                "eligible": False,
+                "outcome": "severity_filtered_out",
+                "detail": f"severity not in configured FOD_SEVERITY_STRINGS: {vuln['severity']}",
+            }
+            continue
+
         guidance_payload = client.get_aviator_guidance(int(vuln["vuln_id"]))
         guidance = client.parse_aviator_guidance(guidance_payload)
         passed, reasons, exploitability = quality_gate_check(gate, vuln, guidance, changed_files)
@@ -1055,6 +1130,7 @@ def run() -> None:
                 if not all_diffs:
                     raise RuntimeError(f"No grouped diff produced for {severity} / {category}")
 
+                validate_remediation_changes(worktree_root, unique_applied_files)
                 create_branch_and_commit(worktree_root, branch_name, commit_message, unique_applied_files)
 
             body = grouped_remediation_body(

@@ -270,7 +270,7 @@ def synthesize_remediation_metrics(metrics: Mapping[str, Any]) -> Dict[str, Any]
 def _bucket_label_for_outcome(outcome: str) -> str:
     mapping = {
         "no_fix_suggestion": "No fix suggestion",
-        "severity_filtered_out": "Below severity threshold",
+        "severity_filtered_out": "Outside severity scope",
         "false_positive": "False positive",
         "manual_intervention": "Manual intervention required",
         "patch_apply_failure": "Patch apply failure",

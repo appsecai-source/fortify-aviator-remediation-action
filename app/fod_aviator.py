@@ -203,6 +203,11 @@ class FoDAviatorClient:
         severity_strings: Optional[Sequence[str]] = None,
     ) -> List[Dict[str, Any]]:
         requested_severities = [severity.strip() for severity in (severity_strings or []) if severity and severity.strip()]
+        requested_severity_set = {
+            normalize_severity_label(severity).lower()
+            for severity in requested_severities
+            if normalize_severity_label(severity)
+        }
         if not requested_severities:
             requested_severities = [""]
 
@@ -226,6 +231,11 @@ class FoDAviatorClient:
 
                 for item in items:
                     item_id = item.get("id") or item.get("issueId") or item.get("vulnId")
+                    item_severity = normalize_severity_label(
+                        item.get("severityString") or item.get("severity") or ""
+                    ).lower()
+                    if requested_severity_set and item_severity not in requested_severity_set:
+                        continue
                     if item_id in seen_ids:
                         continue
                     seen_ids.add(item_id)
@@ -247,7 +257,9 @@ class FoDAviatorClient:
 
     @staticmethod
     def normalize_vulnerability(vulnerability: Dict[str, Any]) -> Dict[str, Any]:
-        severity = vulnerability.get("severityString") or vulnerability.get("severity") or "Unknown"
+        severity = normalize_severity_label(
+            vulnerability.get("severityString") or vulnerability.get("severity") or "Unknown"
+        )
         auditor_status = str(vulnerability.get("auditorStatus") or "").strip()
         legacy_confidence = (
             vulnerability.get("confidence")
@@ -326,6 +338,30 @@ class FoDAviatorClient:
             write_date=payload.get("writeDate", ""),
             raw=payload,
         )
+
+
+def normalize_severity_label(value: Any) -> str:
+    if isinstance(value, int):
+        numeric_mapping = {
+            4: "Critical",
+            3: "High",
+            2: "Medium",
+            1: "Low",
+            0: "Unknown",
+        }
+        return numeric_mapping.get(value, "Unknown")
+
+    lowered = str(value or "").strip().lower()
+    mapping = {
+        "critical": "Critical",
+        "high": "High",
+        "medium": "Medium",
+        "low": "Low",
+        "informational": "Informational",
+        "best practice": "Best Practice",
+        "unknown": "Unknown",
+    }
+    return mapping.get(lowered, str(value or "").strip() or "Unknown")
 
 
 def severity_rank(severity: str) -> int:
