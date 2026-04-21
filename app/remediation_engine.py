@@ -402,13 +402,36 @@ def ensure_git_identity(repo_root: Path) -> None:
     subprocess.run(["git", "config", "user.email", email], cwd=repo_root, check=True)
 
 
+def git_remote_branch_head(repo_root: Path, branch_name: str) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "ls-remote", "--heads", "origin", branch_name],
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return ""
+
+    line = result.stdout.strip()
+    if not line:
+        return ""
+    return line.split()[0]
+
+
 def create_branch_and_commit(repo_root: Path, branch_name: str, commit_message: str, files: Sequence[str]) -> None:
-    subprocess.run(["git", "checkout", "-b", branch_name], cwd=repo_root, check=True)
+    remote_head = git_remote_branch_head(repo_root, branch_name)
+    subprocess.run(["git", "checkout", "-B", branch_name], cwd=repo_root, check=True)
     ensure_git_identity(repo_root)
     for filename in files:
         subprocess.run(["git", "add", "--", normalize_repo_path(filename)], cwd=repo_root, check=True)
     subprocess.run(["git", "commit", "-m", commit_message], cwd=repo_root, check=True)
-    subprocess.run(["git", "push", "--set-upstream", "origin", branch_name], cwd=repo_root, check=True)
+    push_command = ["git", "push", "--set-upstream"]
+    if remote_head:
+        push_command.append(f"--force-with-lease={branch_name}:{remote_head}")
+    push_command.extend(["origin", branch_name])
+    subprocess.run(push_command, cwd=repo_root, check=True)
 
 
 def open_pull_request(repo: str, token: str, head: str, base: str, title: str, body: str) -> Dict[str, Any]:
