@@ -19,7 +19,10 @@ from fod_aviator import AviatorGuidance, FileRemediation, FoDAviatorClient, seve
 from metrics import (
     publish_remediation_metrics_markdown,
     render_remediation_metrics_markdown,
+    render_result_summary_markdown,
+    synthesize_result_summary,
     summarize_remediation_outcomes,
+    synthesize_remediation_metrics,
 )
 
 
@@ -43,6 +46,7 @@ VALID_SEVERITY_STRINGS = {
     "low": "Low",
 }
 FIX_BRANCH_PREFIX = "fortify-aviator-fix-"
+GITHUB_PR_BODY_MAX_CHARS = 65536
 
 
 def load_local_env_file() -> None:
@@ -628,17 +632,74 @@ def open_pull_request(repo: str, token: str, head: str, base: str, title: str, b
     return response.json()
 
 
-def grouped_remediation_body(
+def truncate_text(text: str, max_chars: int, label: str) -> str:
+    value = str(text or "")
+    if len(value) <= max_chars:
+        return value
+
+    suffix = f"\n...(truncated {label}; {len(value) - max_chars} characters omitted)"
+    keep = max(max_chars - len(suffix), 0)
+    return value[:keep].rstrip() + suffix
+
+
+def summarize_bulleted_lines(lines: Sequence[str], limit: int, omitted_label: str) -> str:
+    if not lines:
+        return "- None"
+
+    visible = list(lines[:limit])
+    omitted = len(lines) - len(visible)
+    if omitted > 0:
+        visible.append(f"- ... {omitted} additional {omitted_label} omitted")
+    return "\n".join(visible)
+
+
+def build_grouped_analysis_sections(
+    vulns: Sequence[Dict[str, Any]],
+    guidance_by_vuln_id: Dict[str, AviatorGuidance],
+    exploitability_by_vuln_id: Dict[str, float],
+    max_entries: int,
+    max_comment_chars: int,
+) -> str:
+    sections: List[str] = []
+    for vuln in vulns[:max_entries]:
+        vuln_id = str(vuln["vuln_id"])
+        comment = guidance_by_vuln_id[vuln_id].audit_comment or "(No audit comment provided)"
+        comment = truncate_text(comment, max_comment_chars, "analysis comment")
+        sections.append(
+            "\n".join(
+                [
+                    f"### Vulnerability {vuln_id}",
+                    f"- File: {normalize_repo_path(str(vuln.get('file_path') or '(not set)'))}:{vuln.get('line') or 0}",
+                    f"- Exploitability: {exploitability_by_vuln_id[vuln_id]}",
+                    "",
+                    comment,
+                ]
+            )
+        )
+
+    omitted = len(vulns) - min(len(vulns), max_entries)
+    if omitted > 0:
+        sections.append(
+            f"### Additional vulnerabilities\n{omitted} additional vulnerability analyses were omitted to keep the PR body within GitHub limits."
+        )
+    return "\n\n".join(sections)
+
+
+def render_grouped_remediation_body(
     vulns: Sequence[Dict[str, Any]],
     guidance_by_vuln_id: Dict[str, AviatorGuidance],
     exploitability_by_vuln_id: Dict[str, float],
     diffs: List[str],
     skipped_vulns: Sequence[Dict[str, str]],
+    *,
+    max_finding_lines: int,
+    max_updated_files: int,
+    max_traceability_lines: int,
+    max_skipped_lines: int,
+    max_analysis_entries: int,
+    max_analysis_chars: int,
+    max_diff_chars: int,
 ) -> str:
-    if not vulns:
-        raise RuntimeError("Cannot build remediation body without vulnerabilities")
-
-    combined_diff = "\n".join(diffs)[:50000]
     severity, category = remediation_group_key(vulns[0])
     updated_files = sorted(
         {
@@ -647,40 +708,58 @@ def grouped_remediation_body(
             for file_change in guidance_by_vuln_id[str(vuln["vuln_id"])].file_changes
         }
     )
-    finding_lines = "\n".join(
-        (
-            f"- {vuln['vuln_id']} | {normalize_repo_path(str(vuln.get('file_path') or '(not set)'))}:"
-            f"{vuln.get('line') or 0} | confidence={vuln['confidence']} | "
-            f"exploitability={exploitability_by_vuln_id[str(vuln['vuln_id'])]}"
-        )
-        for vuln in vulns
+    finding_lines = summarize_bulleted_lines(
+        [
+            (
+                f"- {vuln['vuln_id']} | {normalize_repo_path(str(vuln.get('file_path') or '(not set)'))}:"
+                f"{vuln.get('line') or 0} | confidence={vuln['confidence']} | "
+                f"exploitability={exploitability_by_vuln_id[str(vuln['vuln_id'])]}"
+            )
+            for vuln in vulns
+        ],
+        max_finding_lines,
+        "findings",
     )
-    analysis_sections = "\n\n".join(
-        (
-            f"### Vulnerability {vuln['vuln_id']}\n"
-            f"{guidance_by_vuln_id[str(vuln['vuln_id'])].audit_comment or '(No audit comment provided)'}"
-        )
-        for vuln in vulns
+    analysis_sections = build_grouped_analysis_sections(
+        vulns,
+        guidance_by_vuln_id,
+        exploitability_by_vuln_id,
+        max_entries=max_analysis_entries,
+        max_comment_chars=max_analysis_chars,
     )
-    traceability_lines = "\n".join(
-        (
-            f"- {vuln['vuln_id']} | instanceId="
-            f"{guidance_by_vuln_id[str(vuln['vuln_id'])].instance_id or '(not set)'} | writeDate="
-            f"{guidance_by_vuln_id[str(vuln['vuln_id'])].write_date or '(not set)'}"
-        )
-        for vuln in vulns
+    traceability_lines = summarize_bulleted_lines(
+        [
+            (
+                f"- {vuln['vuln_id']} | instanceId="
+                f"{guidance_by_vuln_id[str(vuln['vuln_id'])].instance_id or '(not set)'} | writeDate="
+                f"{guidance_by_vuln_id[str(vuln['vuln_id'])].write_date or '(not set)'}"
+            )
+            for vuln in vulns
+        ],
+        max_traceability_lines,
+        "traceability entries",
     )
     skipped_section = ""
     if skipped_vulns:
-        skipped_lines = "\n".join(
-            f"- {item['vulnerability']}: {item['reason']}" for item in skipped_vulns
+        skipped_lines = summarize_bulleted_lines(
+            [
+                f"- {item['vulnerability']}: {item['reason']}"
+                for item in skipped_vulns
+            ],
+            max_skipped_lines,
+            "skipped vulnerabilities",
         )
         skipped_section = f"""
 **Skipped Vulnerabilities In This Group**
 {skipped_lines}
 """
 
-    updated_file_lines = "\n".join(f"- {filename}" for filename in updated_files)
+    updated_file_lines = summarize_bulleted_lines(
+        [f"- {filename}" for filename in updated_files],
+        max_updated_files,
+        "updated files",
+    )
+    combined_diff = truncate_text("\n".join(diffs), max_diff_chars, "generated patch preview")
 
     return f"""## Automated Fortify Aviator remediation PR
 
@@ -706,6 +785,98 @@ def grouped_remediation_body(
 ```diff
 {combined_diff}
 ```
+"""
+
+
+def grouped_remediation_body(
+    vulns: Sequence[Dict[str, Any]],
+    guidance_by_vuln_id: Dict[str, AviatorGuidance],
+    exploitability_by_vuln_id: Dict[str, float],
+    diffs: List[str],
+    skipped_vulns: Sequence[Dict[str, str]],
+) -> str:
+    if not vulns:
+        raise RuntimeError("Cannot build remediation body without vulnerabilities")
+
+    variants = (
+        {
+            "max_finding_lines": 40,
+            "max_updated_files": 60,
+            "max_traceability_lines": 40,
+            "max_skipped_lines": 40,
+            "max_analysis_entries": 12,
+            "max_analysis_chars": 1500,
+            "max_diff_chars": 20000,
+        },
+        {
+            "max_finding_lines": 20,
+            "max_updated_files": 30,
+            "max_traceability_lines": 20,
+            "max_skipped_lines": 20,
+            "max_analysis_entries": 6,
+            "max_analysis_chars": 800,
+            "max_diff_chars": 10000,
+        },
+        {
+            "max_finding_lines": 10,
+            "max_updated_files": 20,
+            "max_traceability_lines": 10,
+            "max_skipped_lines": 10,
+            "max_analysis_entries": 3,
+            "max_analysis_chars": 400,
+            "max_diff_chars": 4000,
+        },
+    )
+
+    for variant in variants:
+        body = render_grouped_remediation_body(
+            vulns,
+            guidance_by_vuln_id,
+            exploitability_by_vuln_id,
+            diffs,
+            skipped_vulns,
+            **variant,
+        )
+        if len(body) <= GITHUB_PR_BODY_MAX_CHARS:
+            return body
+
+    severity, category = remediation_group_key(vulns[0])
+    included_ids = ", ".join(str(vuln["vuln_id"]) for vuln in vulns[:20])
+    if len(vulns) > 20:
+        included_ids = f"{included_ids}, ... (+{len(vulns) - 20} more)"
+    skipped_lines = summarize_bulleted_lines(
+        [f"- {item['vulnerability']}: {item['reason']}" for item in skipped_vulns],
+        10,
+        "skipped vulnerabilities",
+    )
+    files_preview = summarize_bulleted_lines(
+        sorted(
+            {
+                f"- {normalize_repo_path(file_change.filename)}"
+                for guidance in guidance_by_vuln_id.values()
+                for file_change in guidance.file_changes
+            }
+        ),
+        20,
+        "updated files",
+    )
+    return f"""## Automated Fortify Aviator remediation PR
+
+**Group**
+- Severity: {severity}
+- Category: {category}
+- Included vulnerabilities: {len(vulns)}
+
+**Included vulnerability ids**
+{included_ids}
+
+**Updated files**
+{files_preview}
+
+**Skipped Vulnerabilities In This Group**
+{skipped_lines}
+
+The full generated patch was omitted from the PR body to satisfy GitHub's maximum body length limit. Review the branch diff in the PR Files changed tab for the complete remediation patch.
 """
 
 
@@ -943,15 +1114,19 @@ def run() -> None:
             continue
 
     metrics = summarize_remediation_outcomes(metrics_records.values(), decisions)
+    metrics_summary = synthesize_remediation_metrics(metrics)
     metrics_markdown = render_remediation_metrics_markdown(metrics)
-    summary_path = publish_remediation_metrics_markdown(metrics_markdown)
+    results_summary = synthesize_result_summary(metrics_records.values(), decisions)
+    results_markdown = render_result_summary_markdown(results_summary)
+    summary_path = publish_remediation_metrics_markdown(f"{metrics_markdown}\n{results_markdown}")
     print(
         json.dumps(
             {
                 "metrics": metrics,
-                "metrics_markdown": metrics_markdown,
+                "metrics_summary": metrics_summary,
+                "results_summary": results_summary,
                 "metrics_published_to": summary_path or None,
-                "results": decisions or [{"status": "no eligible remediation candidate found"}],
+                "results_count": len(decisions),
             },
             indent=2,
         )

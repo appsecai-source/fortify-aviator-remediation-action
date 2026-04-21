@@ -220,53 +220,299 @@ def summarize_remediation_outcomes(
     }
 
 
+def _pct(numerator: int, denominator: int) -> float:
+    if denominator <= 0:
+        return 0.0
+    return round((numerator / denominator) * 100.0, 1)
+
+
+def _fmt_pct(numerator: int, denominator: int) -> str:
+    return f"{_pct(numerator, denominator):.1f}%"
+
+
+def synthesize_remediation_metrics(metrics: Mapping[str, Any]) -> Dict[str, Any]:
+    overview = dict(metrics.get("overview", {}))
+    total_findings = int(overview.get("total_findings", 0))
+    guidance_available = int(overview.get("guidance_available", 0))
+    eligible = int(overview.get("eligible_for_autofix", 0))
+    applied = int(overview.get("autofix_applied", 0))
+    pr_groups_published = int(overview.get("pr_groups_published", 0))
+    pr_group_errors = int(overview.get("pr_group_errors", 0))
+
+    blocker_candidates = [
+        ("Fix failures", int(overview.get("fix_failures", 0))),
+        ("Patch apply failures", int(overview.get("patch_apply_failures", 0))),
+        ("No fix suggestion", int(overview.get("no_fix_suggestion", 0))),
+        ("Other skips", int(overview.get("other_skips_combined", 0))),
+        ("False positives", int(overview.get("false_positives", 0))),
+        ("Manual intervention", int(overview.get("manual_intervention", 0))),
+    ]
+    top_blockers = [
+        {"label": label, "count": count}
+        for label, count in sorted(blocker_candidates, key=lambda item: item[1], reverse=True)
+        if count > 0
+    ][:3]
+
+    return {
+        "reviewed_findings": total_findings,
+        "guided_findings": guidance_available,
+        "guided_rate_pct": _pct(guidance_available, total_findings),
+        "eligible_findings": eligible,
+        "eligible_rate_pct": _pct(eligible, total_findings),
+        "autofixes_applied": applied,
+        "autofix_success_rate_pct": _pct(applied, eligible),
+        "pr_groups_published": pr_groups_published,
+        "pr_group_errors": pr_group_errors,
+        "top_blockers": top_blockers,
+    }
+
+
+def _bucket_label_for_outcome(outcome: str) -> str:
+    mapping = {
+        "no_fix_suggestion": "No fix suggestion",
+        "severity_filtered_out": "Below severity threshold",
+        "false_positive": "False positive",
+        "manual_intervention": "Manual intervention required",
+        "patch_apply_failure": "Patch apply failure",
+        "fix_failure": "PR publication failure",
+        "out_of_scope": "Out of scope",
+        "policy_skipped": "Policy skipped",
+        "other_skipped": "Other skip",
+    }
+    return mapping.get(outcome, "Other skip")
+
+
+def _bucket_detail_for_record(record: Mapping[str, Any]) -> str:
+    outcome = str(record.get("outcome") or "").strip()
+    detail = str(record.get("detail") or "").strip()
+
+    if outcome == "no_fix_suggestion":
+        return ""
+    if outcome == "false_positive":
+        return str(record.get("auditor_status") or detail or "").strip()
+    if outcome == "manual_intervention":
+        return str(record.get("auditor_status") or detail or "").strip()
+    return detail
+
+
+def _format_severity_mix(severity_counts: Mapping[str, int]) -> str:
+    parts = [
+        f"{severity} {count}"
+        for severity, count in sorted(severity_counts.items(), key=lambda item: _severity_sort_key(item[0]))
+    ]
+    return ", ".join(parts)
+
+
+def _md_cell(value: Any, max_chars: int | None = None) -> str:
+    text = str(value or "-").replace("\n", "<br>").replace("|", "\\|")
+    if max_chars is not None and len(text) > max_chars:
+        return text[: max_chars - 3].rstrip() + "..."
+    return text
+
+
+def synthesize_result_summary(
+    records: Iterable[Mapping[str, Any]],
+    decisions: Iterable[Mapping[str, Any]],
+    *,
+    max_buckets: int = 8,
+    max_samples: int = 5,
+) -> Dict[str, Any]:
+    pr_activity = []
+    unfixed_buckets: Dict[tuple[str, str], Dict[str, Any]] = {}
+
+    for decision in decisions:
+        status = str(decision.get("status") or "").strip()
+        if status not in {"pr_created", "pr_already_exists", "error"}:
+            continue
+
+        pr_activity.append(
+            {
+                "result": {
+                    "pr_created": "PR created",
+                    "pr_already_exists": "PR updated",
+                    "error": "PR failed",
+                }[status],
+                "severity": str(decision.get("severity") or "Unknown"),
+                "category": str(decision.get("category") or "Uncategorized"),
+                "included_findings": len(decision.get("vulnerabilities", [])),
+                "skipped_during_apply": len(decision.get("skipped_vulnerabilities", [])),
+                "pull_request": decision.get("pull_request"),
+                "error": decision.get("error"),
+            }
+        )
+
+    pr_activity.sort(key=lambda item: (_severity_sort_key(item["severity"]), item["category"]))
+
+    for record in records:
+        outcome = str(record.get("outcome") or "").strip()
+        if outcome in {"", "eligible", "autofix_applied"}:
+            continue
+
+        label = _bucket_label_for_outcome(outcome)
+        detail = _bucket_detail_for_record(record)
+        key = (label, detail)
+        bucket = unfixed_buckets.setdefault(
+            key,
+            {
+                "reason": label,
+                "detail": detail or None,
+                "count": 0,
+                "severity_counts": {},
+                "sample_vulnerabilities": [],
+                "sample_categories": [],
+            },
+        )
+        severity = str(record.get("severity") or "Unknown").strip() or "Unknown"
+        category = str(record.get("category") or "Uncategorized").strip() or "Uncategorized"
+        vulnerability = record.get("vulnerability")
+
+        bucket["count"] += 1
+        bucket["severity_counts"][severity] = int(bucket["severity_counts"].get(severity, 0)) + 1
+        if vulnerability not in bucket["sample_vulnerabilities"] and len(bucket["sample_vulnerabilities"]) < max_samples:
+            bucket["sample_vulnerabilities"].append(vulnerability)
+        if category not in bucket["sample_categories"] and len(bucket["sample_categories"]) < max_samples:
+            bucket["sample_categories"].append(category)
+
+    sorted_buckets = sorted(
+        unfixed_buckets.values(),
+        key=lambda item: (-int(item["count"]), item["reason"], item["detail"] or ""),
+    )
+    visible_buckets = []
+    for bucket in sorted_buckets[:max_buckets]:
+        visible_buckets.append(
+            {
+                "reason": bucket["reason"],
+                "detail": bucket["detail"],
+                "count": bucket["count"],
+                "severity_mix": _format_severity_mix(bucket["severity_counts"]),
+                "sample_vulnerabilities": bucket["sample_vulnerabilities"],
+                "sample_categories": bucket["sample_categories"],
+            }
+        )
+
+    return {
+        "pull_request_activity": pr_activity,
+        "unfixed_findings": visible_buckets,
+        "additional_unfixed_buckets": max(len(sorted_buckets) - len(visible_buckets), 0),
+    }
+
+
 def render_remediation_metrics_markdown(metrics: Mapping[str, Any]) -> str:
     overview = dict(metrics.get("overview", {}))
     by_severity = list(metrics.get("by_severity", []))
-
-    overview_rows = [
-        ("Findings Fetched", overview.get("total_findings", 0)),
-        ("Guidance Available", overview.get("guidance_available", 0)),
-        ("Structured Fix Suggestions", overview.get("structured_fix_suggestions", 0)),
-        ("Eligible For Autofix", overview.get("eligible_for_autofix", 0)),
-        ("Autofix Applied", overview.get("autofix_applied", 0)),
-        ("PR Groups Created", overview.get("pr_groups_created", 0)),
-        ("PR Groups Updated", overview.get("pr_groups_updated", 0)),
-        ("PR Group Errors", overview.get("pr_group_errors", 0)),
-        ("No Fix Suggestion", overview.get("no_fix_suggestion", 0)),
-        ("Patch Apply Failures", overview.get("patch_apply_failures", 0)),
-        ("Fix Failures", overview.get("fix_failures", 0)),
-        ("False Positives Skipped", overview.get("false_positives", 0)),
-        ("Manual Intervention Skipped", overview.get("manual_intervention", 0)),
-        ("Other Skips", overview.get("other_skips_combined", 0)),
-        ("Pending Review Autofixed", overview.get("pending_review_autofixed", 0)),
-    ]
+    summary = synthesize_remediation_metrics(metrics)
+    total_findings = int(overview.get("total_findings", 0))
+    guidance_available = int(overview.get("guidance_available", 0))
+    eligible = int(overview.get("eligible_for_autofix", 0))
+    applied = int(overview.get("autofix_applied", 0))
+    pr_groups_published = int(overview.get("pr_groups_published", 0))
+    pr_group_errors = int(overview.get("pr_group_errors", 0))
+    top_blockers = list(summary.get("top_blockers", []))
+    blocker_text = ", ".join(
+        f"{item['label'].lower()} ({item['count']})"
+        for item in top_blockers
+    ) or "none"
 
     lines = [
-        "## Fortify Aviator Remediation Metrics",
+        "## Fortify Aviator Remediation Summary",
         "",
-        "### Overall",
+        "### At A Glance",
         "",
-        "| Metric | Count |",
-        "| --- | ---: |",
+        f"- Reviewed **{total_findings}** findings.",
+        f"- Aviator returned fix suggestions for **{guidance_available}** findings ({_fmt_pct(guidance_available, total_findings)} of all findings).",
+        f"- **{eligible}** findings were eligible for autofix, and **{applied}** were applied ({_fmt_pct(applied, eligible)} success on eligible findings).",
+        f"- Published **{pr_groups_published}** remediation PR groups; **{pr_group_errors}** groups still failed during PR creation or update.",
+        f"- Main blockers were {blocker_text}.",
+        "",
+        "### Remediation Funnel",
+        "",
+        "| Stage | Findings | Share Of Total | Conversion |",
+        "| --- | ---: | ---: | ---: |",
+        f"| Reviewed | {total_findings} | 100.0% | - |",
+        f"| Guidance available | {guidance_available} | {_fmt_pct(guidance_available, total_findings)} | {_fmt_pct(guidance_available, total_findings)} |",
+        f"| Eligible for autofix | {eligible} | {_fmt_pct(eligible, total_findings)} | {_fmt_pct(eligible, guidance_available)} |",
+        f"| Autofix applied | {applied} | {_fmt_pct(applied, total_findings)} | {_fmt_pct(applied, eligible)} |",
+        "",
+        "### What Blocked More Fixes",
+        "",
+        "| Outcome | Findings | Share Of Total |",
+        "| --- | ---: | ---: |",
+        f"| No fix suggestion | {int(overview.get('no_fix_suggestion', 0))} | {_fmt_pct(int(overview.get('no_fix_suggestion', 0)), total_findings)} |",
+        f"| Patch apply failure | {int(overview.get('patch_apply_failures', 0))} | {_fmt_pct(int(overview.get('patch_apply_failures', 0)), total_findings)} |",
+        f"| Fix failure | {int(overview.get('fix_failures', 0))} | {_fmt_pct(int(overview.get('fix_failures', 0)), total_findings)} |",
+        f"| Other skips | {int(overview.get('other_skips_combined', 0))} | {_fmt_pct(int(overview.get('other_skips_combined', 0)), total_findings)} |",
+        "",
+        "### Severity Breakdown",
+        "",
+        "| Severity | Findings | Eligible | Fixed | Success On Eligible | No Suggestion | Patch Failures | Fix Failures | PR Groups |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
-    lines.extend(f"| {label} | {value} |" for label, value in overview_rows)
-    lines.extend(
-        [
-            "",
-            "### By Severity",
-            "",
-            "| Severity | Findings | Guidance | Eligible | Autofix Applied | PR Groups | No Fix Suggestion | Patch Failures | Fix Failures | False Positives | Manual Intervention | Other Skips |",
-            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
-        ]
-    )
 
     for row in by_severity:
         lines.append(
-            "| {severity} | {total_findings} | {guidance_available} | {eligible_for_autofix} | "
-            "{autofix_applied} | {pr_groups_published} | {no_fix_suggestion} | "
-            "{patch_apply_failures} | {fix_failures} | {false_positives} | "
-            "{manual_intervention} | {other_skips_combined} |".format(**row)
+            "| {severity} | {total_findings} | {eligible_for_autofix} | {autofix_applied} | "
+            "{success_rate} | {no_fix_suggestion} | {patch_apply_failures} | "
+            "{fix_failures} | {pr_groups_published} |".format(
+                **row,
+                success_rate=_fmt_pct(
+                    int(row.get("autofix_applied", 0)),
+                    int(row.get("eligible_for_autofix", 0)),
+                ),
+            )
+        )
+
+    return "\n".join(lines) + "\n"
+
+
+def render_result_summary_markdown(result_summary: Mapping[str, Any]) -> str:
+    pr_activity = list(result_summary.get("pull_request_activity", []))
+    unfixed_findings = list(result_summary.get("unfixed_findings", []))
+    additional_unfixed = int(result_summary.get("additional_unfixed_buckets", 0))
+
+    lines = [
+        "### PR Activity",
+        "",
+        "| Result | Severity | Category | Included | Skipped During Apply | Reference |",
+        "| --- | --- | --- | ---: | ---: | --- |",
+    ]
+    if pr_activity:
+        for item in pr_activity:
+            reference = item.get("pull_request") or item.get("error") or "-"
+            lines.append(
+                f"| {_md_cell(item['result'])} | {_md_cell(item['severity'])} | {_md_cell(item['category'])} | "
+                f"{item['included_findings']} | {item['skipped_during_apply']} | {_md_cell(reference, 140)} |"
+            )
+    else:
+        lines.append("| No PR activity | - | - | 0 | 0 | - |")
+
+    lines.extend(
+        [
+            "",
+            "### Largest Unfixed Buckets",
+            "",
+            "| Reason | Findings | Severity Mix | Example Categories | Sample Vulnerabilities |",
+            "| --- | ---: | --- | --- | --- |",
+        ]
+    )
+    if unfixed_findings:
+        for item in unfixed_findings:
+            reason = item["reason"]
+            if item.get("detail"):
+                reason = f"{reason}: {item['detail']}"
+            lines.append(
+                f"| {_md_cell(reason, 140)} | {item['count']} | {_md_cell(item['severity_mix'])} | "
+                f"{_md_cell(', '.join(str(value) for value in item.get('sample_categories', [])) or '-')} | "
+                f"{_md_cell(', '.join(str(value) for value in item.get('sample_vulnerabilities', [])) or '-')} |"
+            )
+    else:
+        lines.append("| None | 0 | - | - | - |")
+
+    if additional_unfixed > 0:
+        lines.extend(
+            [
+                "",
+                f"{additional_unfixed} additional low-volume unfixed buckets were omitted from this summary.",
+            ]
         )
 
     return "\n".join(lines) + "\n"
