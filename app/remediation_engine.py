@@ -110,6 +110,16 @@ def configured_pr_grouping_mode() -> str:
     return raw_value
 
 
+def persist_results_payload(payload: Dict[str, Any]) -> None:
+    results_path = os.environ.get("REMEDIATION_RESULTS_PATH", "").strip()
+    rendered = json.dumps(payload, indent=2)
+    if results_path:
+        target_path = Path(results_path)
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_text(rendered + "\n", encoding="utf-8")
+    print(rendered)
+
+
 def normalize_repo_path(value: str) -> str:
     return Path(value).as_posix().lstrip("./")
 
@@ -532,11 +542,14 @@ def git_diff_for_files(repo_root: Path, files: Sequence[str]) -> List[str]:
 
 
 def configured_validation_command() -> str:
-    return os.environ.get("REMEDIATION_VALIDATE_COMMAND", "mvn -q -DskipTests compile").strip()
+    return os.environ.get("REMEDIATION_VALIDATE_COMMAND", "").strip()
 
 
 def should_validate_remediation(files: Sequence[str]) -> bool:
-    return any(normalize_repo_path(filename).endswith(".java") for filename in files)
+    if not files:
+        return False
+    command = configured_validation_command().lower()
+    return command not in {"", "0", "false", "off", "none"}
 
 
 def validate_remediation_changes(repo_root: Path, files: Sequence[str]) -> None:
@@ -544,8 +557,6 @@ def validate_remediation_changes(repo_root: Path, files: Sequence[str]) -> None:
         return
 
     command = configured_validation_command()
-    if command.lower() in {"", "0", "false", "off", "none"}:
-        return
 
     result = subprocess.run(
         shlex.split(command),
@@ -558,7 +569,7 @@ def validate_remediation_changes(repo_root: Path, files: Sequence[str]) -> None:
         return
 
     output = "\n".join(part.strip() for part in [result.stdout, result.stderr] if part.strip())
-    detail = truncate_text(output, 4000, "validation output") if output else "No compiler output captured."
+    detail = truncate_text(output, 4000, "validation output") if output else "No validation output captured."
     raise RuntimeError(f"Validation command failed for remediation changes ({command}).\n{detail}")
 
 
@@ -1311,17 +1322,14 @@ def run() -> None:
     results_summary = synthesize_result_summary(metrics_records.values(), decisions)
     results_markdown = render_result_summary_markdown(results_summary)
     summary_path = publish_remediation_metrics_markdown(f"{metrics_markdown}\n{results_markdown}")
-    print(
-        json.dumps(
-            {
-                "metrics": metrics,
-                "metrics_summary": metrics_summary,
-                "results_summary": results_summary,
-                "metrics_published_to": summary_path or None,
-                "results_count": len(decisions),
-            },
-            indent=2,
-        )
+    persist_results_payload(
+        {
+            "metrics": metrics,
+            "metrics_summary": metrics_summary,
+            "results_summary": results_summary,
+            "metrics_published_to": summary_path or None,
+            "results_count": len(decisions),
+        }
     )
 
 

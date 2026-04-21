@@ -1,47 +1,341 @@
-# Fortify Aviator remediation for Security Shepherd
+# Fortify Aviator Remediation Action
 
-This folder adds a Fortify on Demand plus Aviator remediation engine to Security Shepherd.
+Reusable GitHub Action that pulls Fortify on Demand findings for a release, requests Aviator remediation guidance, applies safe patches in the checked-out repository, and opens remediation pull requests.
 
 It is designed to:
 - authenticate to Fortify on Demand
-- pull vulnerabilities for a configured release
-- request Aviator remediation guidance
-- apply safe file-level patches only when they pass quality gates
-- create remediation branches and open GitHub pull requests either per issue or grouped by severity and category
+- fetch vulnerabilities for a configured release
+- request Aviator remediation guidance per finding
+- apply structured file changes only when the quality gates pass
+- optionally validate generated changes with a project-specific command
+- create remediation pull requests either by category or one finding at a time
+- publish compact remediation metrics and skipped-finding summaries
 
-## Files
+This folder is self-contained enough to be moved into its own repository. If you publish it as a standalone action repository, keep the contents of this folder at the repository root.
 
-- `app/fod_aviator.py` FoD client and Aviator guidance parser
-- `app/remediation_engine.py` patch application, gating, branch creation, and PR creation
-- `app/metrics.py` telemetry helpers for MTTR and backlog reporting
-- `../.github/workflows/fortify.yml` combined Fortify scan and remediation workflow
-- `.env.example` local configuration template
-- `requirements.txt` Python dependencies
+## What You Get
 
-## Required GitHub repository secrets
+- Composite action entry point in `action.yml`
+- Remediation engine in `app/remediation_engine.py`
+- Fortify client and guidance parser in `app/fod_aviator.py`
+- Metrics and summaries in `app/metrics.py`
+- Wrapper scripts in `scripts/`
 
-- `FOD_CLIENT_ID` and `FOD_CLIENT_SECRET`
-  Preferred for remediation API access.
+## Requirements
+
+Before running this action:
+- check out the target repository with `actions/checkout`
+- grant the job `contents: write` and `pull-requests: write`
+- provide a Fortify release id and FoD API credentials
+- provide a GitHub token that can push branches and create or update PRs
+- if you want validation, install the target project's toolchain before this action or use the built-in optional Java setup
+
+Recommended checkout:
+
+```yaml
+- uses: actions/checkout@v4
+  with:
+    fetch-depth: 0
+```
+
+Recommended job permissions:
+
+```yaml
+permissions:
+  contents: write
+  pull-requests: write
+```
+
+## Quick Start
+
+```yaml
+name: Fortify Aviator Remediation
+
+on:
+  workflow_dispatch:
+
+jobs:
+  remediate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run remediation
+        uses: your-org/fortify-aviator-remediation-action@v1
+        with:
+          fod-client-id: ${{ secrets.FOD_CLIENT_ID }}
+          fod-client-secret: ${{ secrets.FOD_CLIENT_SECRET }}
+          fod-release-id: ${{ secrets.FOD_RELEASE_ID }}
+          github-token: ${{ secrets.REMEDIATION_GITHUB_TOKEN || github.token }}
+```
+
+By default, the action does not assume any application language or build tool. Validation is off unless you pass a project-specific command.
+
+## Inputs
+
+| Input | Required | Default | Description |
+| --- | --- | --- | --- |
+| `fod-base-url` | No | `https://api.ams.fortify.com` | Fortify on Demand API base URL. |
+| `fod-client-id` | Yes | - | Fortify on Demand client ID. |
+| `fod-client-secret` | Yes | - | Fortify on Demand client secret. |
+| `fod-tenant` | No | `""` | Fortify tenant name used with password-grant flows. |
+| `fod-user` | No | `""` | Fortify username for password or PAT authentication. |
+| `fod-password` | No | `""` | Fortify password or PAT for password-grant authentication. |
+| `fod-oauth-scope` | No | `api-tenant` | OAuth scope requested from Fortify. |
+| `fod-release-id` | Yes | - | Numeric Fortify release identifier. |
+| `fod-severity-strings` | No | `Critical` | Comma-separated severities to remediate, for example `Critical,High`. |
+| `fod-pr-grouping` | No | `category` | PR grouping mode. Supported values are `category` and `issue`. |
+| `fod-verify-ssl` | No | `true` | Whether FoD HTTPS certificates are verified. |
+| `github-token` | Yes | - | Token used to push branches and create or update pull requests. |
+| `github-repository` | No | current workflow repository | Repository in `owner/repo` form. |
+| `pr-number` | No | auto-detected when available | Pull request number for PR-scoped remediation. |
+| `github-base-ref` | No | auto-detected when available | Base branch used for worktrees and pull requests. |
+| `remediation-validate-command` | No | `false` | Optional project-specific validation command run before publishing changes. Examples: `mvn test`, `npm test`, `pytest -q`, `dotnet build`. |
+| `git-user-name` | No | auto-derived | Commit author name used for remediation branches. |
+| `git-user-email` | No | auto-derived | Commit author email used for remediation branches. |
+| `python-version` | No | `3.11` | Python version used to run the action. |
+| `setup-java` | No | `false` | Whether the action should install Java before remediation runs. Useful for Maven or Gradle validation. |
+| `java-version` | No | `8` | Java version to install when `setup-java` is enabled. |
+| `java-distribution` | No | `temurin` | Java distribution to install when `setup-java` is enabled. |
+
+## Outputs
+
+| Output | Description |
+| --- | --- |
+| `results-file` | Path to the JSON results file produced by the remediation run. |
+| `results-count` | Number of decision records generated by the run. |
+| `metrics-summary` | Compact JSON summary of remediation metrics. |
+| `results-summary` | Compact JSON summary of PR activity and skipped-bucket results. |
+| `metrics-published-to` | Step summary file path when markdown metrics were published in GitHub Actions. |
+
+## Suggested Repository Secrets And Variables
+
+Typical secrets:
+- `FOD_CLIENT_ID`
+- `FOD_CLIENT_SECRET`
 - `FOD_RELEASE_ID`
+- `REMEDIATION_GITHUB_TOKEN` if you do not want to rely on the default workflow token
 
-Optional:
-
+Optional secrets:
 - `FOD_TENANT`
 - `FOD_USER`
-  For password grant, use `tenant\username` or combine with `FOD_TENANT`.
 - `FOD_PASSWORD` or `FOD_PAT`
-- repository variable `FOD_URL`
-- repository variable `FOD_BASE_URL`
-- repository variable `FOD_OAUTH_SCOPE`
-- repository variable `FOD_VERIFY_SSL`
-- repository variable `FOD_SEVERITY_STRINGS`
-  Defaults to `Critical`. Use comma-separated values such as `Critical,High` when you want to widen scope.
-- repository variable `FOD_PR_GROUPING`
-  Defaults to `category`. Use `issue` when you want one remediation PR per eligible vulnerability.
 
-The workflow uses GitHub's built-in `GITHUB_TOKEN` for branch pushes and PR creation.
+Useful repository variables:
+- `FOD_BASE_URL`
+- `FOD_OAUTH_SCOPE`
+- `FOD_VERIFY_SSL`
+- `FOD_SEVERITY_STRINGS`
+- `FOD_PR_GROUPING`
+- `REMEDIATION_VALIDATE_COMMAND`
 
-## Local run
+## Examples
+
+### Minimal External Usage
+
+```yaml
+- name: Run Fortify Aviator remediation
+  uses: your-org/fortify-aviator-remediation-action@v1
+  with:
+    fod-client-id: ${{ secrets.FOD_CLIENT_ID }}
+    fod-client-secret: ${{ secrets.FOD_CLIENT_SECRET }}
+    fod-release-id: ${{ secrets.FOD_RELEASE_ID }}
+    github-token: ${{ secrets.REMEDIATION_GITHUB_TOKEN || github.token }}
+```
+
+### Group Findings By Category
+
+`category` is the default, but setting it explicitly can make workflow intent clearer.
+
+```yaml
+- name: Group remediation PRs by category
+  uses: your-org/fortify-aviator-remediation-action@v1
+  with:
+    fod-client-id: ${{ secrets.FOD_CLIENT_ID }}
+    fod-client-secret: ${{ secrets.FOD_CLIENT_SECRET }}
+    fod-release-id: ${{ secrets.FOD_RELEASE_ID }}
+    github-token: ${{ secrets.REMEDIATION_GITHUB_TOKEN || github.token }}
+    fod-severity-strings: Critical,High
+    fod-pr-grouping: category
+```
+
+### Create One PR Per Finding
+
+```yaml
+- name: Create one remediation PR per finding
+  uses: your-org/fortify-aviator-remediation-action@v1
+  with:
+    fod-client-id: ${{ secrets.FOD_CLIENT_ID }}
+    fod-client-secret: ${{ secrets.FOD_CLIENT_SECRET }}
+    fod-release-id: ${{ secrets.FOD_RELEASE_ID }}
+    github-token: ${{ secrets.REMEDIATION_GITHUB_TOKEN || github.token }}
+    fod-pr-grouping: issue
+```
+
+### Run In PR Scope
+
+Use this when you want remediation to stay limited to files already touched by the PR.
+
+```yaml
+- name: PR-scoped remediation
+  uses: your-org/fortify-aviator-remediation-action@v1
+  with:
+    fod-client-id: ${{ secrets.FOD_CLIENT_ID }}
+    fod-client-secret: ${{ secrets.FOD_CLIENT_SECRET }}
+    fod-release-id: ${{ secrets.FOD_RELEASE_ID }}
+    github-token: ${{ secrets.REMEDIATION_GITHUB_TOKEN || github.token }}
+    pr-number: ${{ github.event.pull_request.number }}
+    github-base-ref: ${{ github.base_ref }}
+```
+
+### Disable Validation
+
+Useful for repositories that do not want any validation gate.
+
+```yaml
+- name: Remediation without validation
+  uses: your-org/fortify-aviator-remediation-action@v1
+  with:
+    fod-client-id: ${{ secrets.FOD_CLIENT_ID }}
+    fod-client-secret: ${{ secrets.FOD_CLIENT_SECRET }}
+    fod-release-id: ${{ secrets.FOD_RELEASE_ID }}
+    github-token: ${{ secrets.REMEDIATION_GITHUB_TOKEN || github.token }}
+    remediation-validate-command: "false"
+```
+
+### Java Or Kotlin Project
+
+```yaml
+- name: Java remediation with Maven validation
+  uses: your-org/fortify-aviator-remediation-action@v1
+  with:
+    fod-client-id: ${{ secrets.FOD_CLIENT_ID }}
+    fod-client-secret: ${{ secrets.FOD_CLIENT_SECRET }}
+    fod-release-id: ${{ secrets.FOD_RELEASE_ID }}
+    github-token: ${{ secrets.REMEDIATION_GITHUB_TOKEN || github.token }}
+    setup-java: "true"
+    java-version: "17"
+    remediation-validate-command: "mvn -q -DskipTests compile"
+```
+
+### JavaScript Or TypeScript Project
+
+Install Node before the action, then pass your project validation command.
+
+```yaml
+- uses: actions/setup-node@v4
+  with:
+    node-version: "20"
+
+- name: Node remediation with tests
+  uses: your-org/fortify-aviator-remediation-action@v1
+  with:
+    fod-client-id: ${{ secrets.FOD_CLIENT_ID }}
+    fod-client-secret: ${{ secrets.FOD_CLIENT_SECRET }}
+    fod-release-id: ${{ secrets.FOD_RELEASE_ID }}
+    github-token: ${{ secrets.REMEDIATION_GITHUB_TOKEN || github.token }}
+    remediation-validate-command: "npm test"
+```
+
+### Python Project
+
+```yaml
+- uses: actions/setup-python@v5
+  with:
+    python-version: "3.12"
+
+- run: pip install -r requirements.txt
+
+- name: Python remediation with pytest
+  uses: your-org/fortify-aviator-remediation-action@v1
+  with:
+    fod-client-id: ${{ secrets.FOD_CLIENT_ID }}
+    fod-client-secret: ${{ secrets.FOD_CLIENT_SECRET }}
+    fod-release-id: ${{ secrets.FOD_RELEASE_ID }}
+    github-token: ${{ secrets.REMEDIATION_GITHUB_TOKEN || github.token }}
+    remediation-validate-command: "pytest -q"
+```
+
+### .NET Project
+
+```yaml
+- uses: actions/setup-dotnet@v4
+  with:
+    dotnet-version: "8.0.x"
+
+- name: .NET remediation with build validation
+  uses: your-org/fortify-aviator-remediation-action@v1
+  with:
+    fod-client-id: ${{ secrets.FOD_CLIENT_ID }}
+    fod-client-secret: ${{ secrets.FOD_CLIENT_SECRET }}
+    fod-release-id: ${{ secrets.FOD_RELEASE_ID }}
+    github-token: ${{ secrets.REMEDIATION_GITHUB_TOKEN || github.token }}
+    remediation-validate-command: "dotnet build"
+```
+
+### Go Project
+
+```yaml
+- uses: actions/setup-go@v5
+  with:
+    go-version: "1.22"
+
+- name: Go remediation with tests
+  uses: your-org/fortify-aviator-remediation-action@v1
+  with:
+    fod-client-id: ${{ secrets.FOD_CLIENT_ID }}
+    fod-client-secret: ${{ secrets.FOD_CLIENT_SECRET }}
+    fod-release-id: ${{ secrets.FOD_RELEASE_ID }}
+    github-token: ${{ secrets.REMEDIATION_GITHUB_TOKEN || github.token }}
+    remediation-validate-command: "go test ./..."
+```
+
+### Consume Action Outputs
+
+```yaml
+- name: Run remediation
+  id: remediation
+  uses: your-org/fortify-aviator-remediation-action@v1
+  with:
+    fod-client-id: ${{ secrets.FOD_CLIENT_ID }}
+    fod-client-secret: ${{ secrets.FOD_CLIENT_SECRET }}
+    fod-release-id: ${{ secrets.FOD_RELEASE_ID }}
+    github-token: ${{ secrets.REMEDIATION_GITHUB_TOKEN || github.token }}
+
+- name: Print summaries
+  run: |
+    echo '${{ steps.remediation.outputs.metrics-summary }}'
+    echo '${{ steps.remediation.outputs.results-summary }}'
+```
+
+### Use This Repository’s Local Action Path
+
+This is how the bundled Security Shepherd workflow consumes the action:
+
+```yaml
+- name: Run Fortify Aviator remediation action
+  uses: ./fortify_aviator_remediation
+  with:
+    fod-base-url: ${{ vars.FOD_BASE_URL || 'https://api.ams.fortify.com' }}
+    fod-client-id: ${{ secrets.FOD_CLIENT_ID }}
+    fod-client-secret: ${{ secrets.FOD_CLIENT_SECRET }}
+    fod-release-id: ${{ secrets.FOD_RELEASE_ID }}
+    github-token: ${{ secrets.REMEDIATION_GITHUB_TOKEN || github.token }}
+    fod-severity-strings: ${{ vars.FOD_SEVERITY_STRINGS || 'Critical' }}
+    fod-pr-grouping: ${{ vars.FOD_PR_GROUPING || 'category' }}
+    remediation-validate-command: ${{ vars.REMEDIATION_VALIDATE_COMMAND || 'mvn -q -DskipTests compile' }}
+    setup-java: "true"
+    java-version: "8"
+```
+
+## Local Development
+
+Example local run:
 
 ```bash
 python3 -m venv fortify_aviator_remediation/.venv
@@ -54,19 +348,47 @@ set +a
 python fortify_aviator_remediation/app/remediation_engine.py
 ```
 
-## Workflow behavior
+Local environment variables are shown in `.env.example`:
 
-The combined workflow:
-- runs FoD scans on `push` to `master` and `dev`
-- runs FoD scans plus Aviator remediation on `push` to `master` and `dev`
-- still supports `pull_request` events when you want PR comments from the Fortify action
-- supports manual `workflow_dispatch`; supply a branch if you want to override the selected branch
-- uses the numeric FoD release id for both scanning and remediation
-- defaults remediation to vulnerabilities with `FOD_SEVERITY_STRINGS=Critical`
-- defaults remediation PR creation to grouped pull requests by severity and category with `FOD_PR_GROUPING=category`
-- can optionally switch to one pull request per issue with `FOD_PR_GROUPING=issue`
-- requests the FoD OAuth scope `api-tenant` by default for remediation API calls
-- authenticates remediation token requests using the documented FoD form body fields for either `client_credentials` or `password`
-- skips fork-based PRs because the workflow relies on repository credentials
-- uses PR file scope when a PR exists, otherwise it can remediate against the checked-out branch
-- restores only touched files if patch application fails
+```dotenv
+FOD_BASE_URL=https://ams.fortify.com
+FOD_CLIENT_ID=replace_me
+FOD_CLIENT_SECRET=replace_me
+FOD_TENANT=
+FOD_USER=
+FOD_PASSWORD=
+FOD_OAUTH_SCOPE=api-tenant
+FOD_RELEASE_ID=123456
+FOD_VERIFY_SSL=true
+FOD_SEVERITY_STRINGS=Critical
+FOD_PR_GROUPING=category
+GITHUB_TOKEN=replace_me
+GITHUB_REPOSITORY=owner/repo
+PR_NUMBER=
+GITHUB_BASE_REF=main
+GIT_USER_NAME=github-actions[bot]
+GIT_USER_EMAIL=41898282+github-actions[bot]@users.noreply.github.com
+REMEDIATION_VALIDATE_COMMAND=false
+```
+
+## Notes
+
+- The action prefers FoD client credentials and release id inputs.
+- The default grouping mode is `category`.
+- The default validation mode is disabled so the action stays language-neutral out of the box.
+- If you want validation, pass a project-specific command and install any required toolchain in the workflow before this action runs.
+- When grouping by category, failed candidates are skipped and reported while successful candidates can still be published in the same PR.
+- Optional Java setup exists for Maven or Gradle projects, but non-Java projects should use their own setup action instead.
+- The engine writes compact JSON summaries and can publish markdown metrics to the GitHub Actions job summary.
+
+## Example Workflow In This Repository
+
+The bundled workflow in `../.github/workflows/fortify.yml`:
+- runs FoD scans on `push` to `main` and `dev`
+- runs FoD scans plus Aviator remediation on `push` to `main` and `dev`
+- supports `pull_request` events when you want PR comments from the Fortify action
+- supports manual `workflow_dispatch`
+- defaults remediation scope to `FOD_SEVERITY_STRINGS=Critical`
+- defaults PR grouping to `FOD_PR_GROUPING=category`
+- skips fork-based PR remediation because repository credentials are required
+- uses PR file scope when a PR number is available

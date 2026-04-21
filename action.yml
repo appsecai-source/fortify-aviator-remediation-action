@@ -1,0 +1,152 @@
+name: Fortify Aviator Remediation
+description: Run Fortify on Demand Aviator remediation against the checked-out repository and open remediation pull requests.
+
+inputs:
+  fod-base-url:
+    description: Fortify on Demand API base URL.
+    required: false
+    default: https://api.ams.fortify.com
+  fod-client-id:
+    description: Fortify on Demand client ID.
+    required: true
+  fod-client-secret:
+    description: Fortify on Demand client secret.
+    required: true
+  fod-tenant:
+    description: Fortify tenant name for password grant flows.
+    required: false
+    default: ""
+  fod-user:
+    description: Fortify username for password or PAT authentication.
+    required: false
+    default: ""
+  fod-password:
+    description: Fortify password or PAT for password grant flows.
+    required: false
+    default: ""
+  fod-oauth-scope:
+    description: Fortify OAuth scope.
+    required: false
+    default: api-tenant
+  fod-release-id:
+    description: Numeric Fortify release identifier.
+    required: true
+  fod-severity-strings:
+    description: Comma-separated severity labels to remediate.
+    required: false
+    default: Critical
+  fod-pr-grouping:
+    description: PR grouping mode. Supported values are category and issue.
+    required: false
+    default: category
+  fod-verify-ssl:
+    description: Whether HTTPS certificate verification is enabled for FoD API calls.
+    required: false
+    default: "true"
+  github-token:
+    description: Token used for pull request creation and updates.
+    required: true
+  github-repository:
+    description: GitHub repository in owner/repo form. Defaults to the current workflow repository.
+    required: false
+    default: ""
+  pr-number:
+    description: Pull request number when running in PR scope.
+    required: false
+    default: ""
+  github-base-ref:
+    description: Base branch for remediation branches and PRs.
+    required: false
+    default: ""
+  remediation-validate-command:
+    description: Optional project-specific validation command run before publishing remediation changes. Examples: mvn test, npm test, pytest -q, dotnet build. Set to false/off/none to disable.
+    required: false
+    default: "false"
+  git-user-name:
+    description: Commit author name used for remediation branches.
+    required: false
+    default: ""
+  git-user-email:
+    description: Commit author email used for remediation branches.
+    required: false
+    default: ""
+  python-version:
+    description: Python version used to run the remediation engine.
+    required: false
+    default: "3.11"
+  setup-java:
+    description: Optional helper to install Java before remediation runs, useful for Maven or Gradle validation commands.
+    required: false
+    default: "false"
+  java-version:
+    description: Java version to install when setup-java is enabled.
+    required: false
+    default: "8"
+  java-distribution:
+    description: Java distribution to install when setup-java is enabled.
+    required: false
+    default: temurin
+
+outputs:
+  results-file:
+    description: Path to the JSON remediation results file.
+    value: ${{ steps.run.outputs.results-file }}
+  results-count:
+    description: Number of remediation decision records produced by the run.
+    value: ${{ steps.run.outputs.results-count }}
+  metrics-summary:
+    description: JSON summary of remediation metrics.
+    value: ${{ steps.run.outputs.metrics-summary }}
+  results-summary:
+    description: JSON summary of pull request activity and skipped buckets.
+    value: ${{ steps.run.outputs.results-summary }}
+  metrics-published-to:
+    description: Step summary path when metrics were published in GitHub Actions.
+    value: ${{ steps.run.outputs.metrics-published-to }}
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Set up Java
+      if: ${{ inputs.setup-java == 'true' }}
+      uses: actions/setup-java@v4
+      with:
+        distribution: ${{ inputs.java-distribution }}
+        java-version: ${{ inputs.java-version }}
+
+    - name: Run Fortify Aviator remediation
+      id: run
+      shell: bash
+      env:
+        INPUT_FOD_BASE_URL: ${{ inputs.fod-base-url }}
+        INPUT_FOD_CLIENT_ID: ${{ inputs.fod-client-id }}
+        INPUT_FOD_CLIENT_SECRET: ${{ inputs.fod-client-secret }}
+        INPUT_FOD_TENANT: ${{ inputs.fod-tenant }}
+        INPUT_FOD_USER: ${{ inputs.fod-user }}
+        INPUT_FOD_PASSWORD: ${{ inputs.fod-password }}
+        INPUT_FOD_OAUTH_SCOPE: ${{ inputs.fod-oauth-scope }}
+        INPUT_FOD_RELEASE_ID: ${{ inputs.fod-release-id }}
+        INPUT_FOD_SEVERITY_STRINGS: ${{ inputs.fod-severity-strings }}
+        INPUT_FOD_PR_GROUPING: ${{ inputs.fod-pr-grouping }}
+        INPUT_FOD_VERIFY_SSL: ${{ inputs.fod-verify-ssl }}
+        INPUT_GITHUB_TOKEN: ${{ inputs.github-token }}
+        INPUT_GITHUB_REPOSITORY: ${{ inputs.github-repository }}
+        INPUT_PR_NUMBER: ${{ inputs.pr-number }}
+        INPUT_GITHUB_BASE_REF: ${{ inputs.github-base-ref }}
+        INPUT_REMEDIATION_VALIDATE_COMMAND: ${{ inputs.remediation-validate-command }}
+        INPUT_GIT_USER_NAME: ${{ inputs.git-user-name }}
+        INPUT_GIT_USER_EMAIL: ${{ inputs.git-user-email }}
+        ACTION_DEFAULT_GITHUB_REPOSITORY: ${{ github.repository }}
+        ACTION_DEFAULT_PR_NUMBER: ${{ github.event.pull_request.number }}
+        ACTION_DEFAULT_BASE_REF: ${{ github.base_ref }}
+        ACTION_DEFAULT_REF_NAME: ${{ github.ref_name }}
+      run: bash "${{ github.action_path }}/scripts/run_action.sh"
+
+branding:
+  icon: shield
+  color: blue
