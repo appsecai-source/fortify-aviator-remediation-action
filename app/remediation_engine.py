@@ -4,10 +4,13 @@ import difflib
 import json
 import os
 import re
+import shutil
 import subprocess
+import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Sequence, Tuple
+from typing import Any, Dict, Iterator, List, Sequence, Tuple
 
 import requests
 
@@ -53,7 +56,7 @@ def load_local_env_file() -> None:
 
 
 def configured_severity_strings() -> List[str]:
-    raw_value = os.environ.get("FOD_SEVERITY_STRINGS", "Critical,High").strip()
+    raw_value = os.environ.get("FOD_SEVERITY_STRINGS", "Critical").strip()
     if not raw_value:
         return []
 
@@ -138,6 +141,15 @@ def git_current_branch(repo_root: Path) -> str:
     except (subprocess.CalledProcessError, FileNotFoundError):
         return ""
     return result.stdout.strip()
+
+
+def git_has_ref(repo_root: Path, ref_name: str) -> bool:
+    result = subprocess.run(
+        ["git", "show-ref", "--verify", "--quiet", ref_name],
+        cwd=repo_root,
+        check=False,
+    )
+    return result.returncode == 0
 
 
 def choose_default_base_branch(repo_root: Path) -> str:
@@ -402,6 +414,40 @@ def ensure_git_identity(repo_root: Path) -> None:
     subprocess.run(["git", "config", "user.email", email], cwd=repo_root, check=True)
 
 
+def git_worktree_start_point(repo_root: Path, base_branch: str) -> str:
+    remote_ref = f"refs/remotes/origin/{base_branch}"
+    if git_has_ref(repo_root, remote_ref):
+        return remote_ref
+
+    local_ref = f"refs/heads/{base_branch}"
+    if git_has_ref(repo_root, local_ref):
+        return local_ref
+
+    return "HEAD"
+
+
+@contextmanager
+def remediation_worktree(repo_root: Path, base_branch: str, vuln_id: str) -> Iterator[Path]:
+    worktree_root = Path(tempfile.mkdtemp(prefix=f"fortify-aviator-{vuln_id}-"))
+    start_point = git_worktree_start_point(repo_root, base_branch)
+    subprocess.run(
+        ["git", "worktree", "add", "--detach", str(worktree_root), start_point],
+        cwd=repo_root,
+        check=True,
+    )
+    try:
+        yield worktree_root
+    finally:
+        subprocess.run(
+            ["git", "worktree", "remove", "--force", str(worktree_root)],
+            cwd=repo_root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        shutil.rmtree(worktree_root, ignore_errors=True)
+
+
 def git_remote_branch_head(repo_root: Path, branch_name: str) -> str:
     try:
         result = subprocess.run(
@@ -543,6 +589,14 @@ def comment_only_summary(vuln: Dict[str, Any], reasons: List[str]) -> Dict[str, 
     }
 
 
+def error_summary(vuln: Dict[str, Any], error: Exception) -> Dict[str, Any]:
+    return {
+        "vulnerability": vuln.get("vuln_id"),
+        "status": "error",
+        "error": str(error),
+    }
+
+
 def run() -> None:
     load_local_env_file()
     repo_root = Path(os.environ.get("GITHUB_WORKSPACE") or Path(__file__).resolve().parents[2]).resolve()
@@ -580,47 +634,46 @@ def run() -> None:
             decisions.append(comment_only_summary(vuln, reasons))
             continue
 
-        all_diffs: List[str] = []
-        applied_files: List[str] = []
-        original_contents: Dict[str, str] = {}
-
-        try:
-            for file_change in guidance.file_changes:
-                before_text, after_text = apply_file_remediation(repo_root, file_change)
-                original_contents[file_change.filename] = before_text
-                diff_text = generate_file_diff(before_text, after_text, file_change.filename)
-                if not diff_text.strip():
-                    raise PatchApplyError(f"No diff produced for {file_change.filename}")
-                all_diffs.append(diff_text)
-                applied_files.append(file_change.filename)
-        except PatchApplyError as exc:
-            restore_files(repo_root, original_contents)
-            decisions.append(comment_only_summary(vuln, [str(exc)]))
-            continue
-
         branch_name = f"fortify-aviator-fix-{vuln['vuln_id']}"
         commit_message = f"fix: Fortify Aviator remediation for vulnerability {vuln['vuln_id']}"
-        create_branch_and_commit(repo_root, branch_name, commit_message, applied_files)
+        try:
+            with remediation_worktree(repo_root, base_branch, str(vuln["vuln_id"])) as worktree_root:
+                all_diffs: List[str] = []
+                applied_files: List[str] = []
 
-        pull_request = open_pull_request(
-            repo=repo,
-            token=token,
-            head=branch_name,
-            base=base_branch,
-            title=f"[AUTO] Fortify Aviator fix for {vuln['category']}",
-            body=remediation_body(vuln, guidance, exploitability, all_diffs),
-        )
-        decisions.append(
-            {
-                "status": "pr_already_exists" if pull_request.get("_existing") else "pr_created",
-                "vulnerability": vuln["vuln_id"],
-                "files": [normalize_repo_path(filename) for filename in applied_files],
-                "exploitability": exploitability,
-                "pull_request": pull_request.get("html_url"),
-            }
-        )
-        print(json.dumps({"results": decisions}, indent=2))
-        return
+                for file_change in guidance.file_changes:
+                    before_text, after_text = apply_file_remediation(worktree_root, file_change)
+                    diff_text = generate_file_diff(before_text, after_text, file_change.filename)
+                    if not diff_text.strip():
+                        raise PatchApplyError(f"No diff produced for {file_change.filename}")
+                    all_diffs.append(diff_text)
+                    applied_files.append(file_change.filename)
+
+                create_branch_and_commit(worktree_root, branch_name, commit_message, applied_files)
+
+            pull_request = open_pull_request(
+                repo=repo,
+                token=token,
+                head=branch_name,
+                base=base_branch,
+                title=f"[AUTO] Fortify Aviator fix for {vuln['category']}",
+                body=remediation_body(vuln, guidance, exploitability, all_diffs),
+            )
+            decisions.append(
+                {
+                    "status": "pr_already_exists" if pull_request.get("_existing") else "pr_created",
+                    "vulnerability": vuln["vuln_id"],
+                    "files": [normalize_repo_path(filename) for filename in applied_files],
+                    "exploitability": exploitability,
+                    "pull_request": pull_request.get("html_url"),
+                }
+            )
+        except PatchApplyError as exc:
+            decisions.append(comment_only_summary(vuln, [str(exc)]))
+            continue
+        except (requests.HTTPError, subprocess.CalledProcessError, RuntimeError) as exc:
+            decisions.append(error_summary(vuln, exc))
+            continue
 
     print(json.dumps({"results": decisions or [{"status": "no eligible remediation candidate found"}]}, indent=2))
 

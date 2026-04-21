@@ -7,7 +7,7 @@ It is designed to:
 - pull vulnerabilities for a configured release
 - request Aviator remediation guidance
 - apply safe file-level patches only when they pass quality gates
-- create a remediation branch and open a GitHub pull request
+- create remediation branches and open GitHub pull requests for each eligible vulnerability
 
 ## Files
 
@@ -34,6 +34,8 @@ Optional:
 - repository variable `FOD_BASE_URL`
 - repository variable `FOD_OAUTH_SCOPE`
 - repository variable `FOD_VERIFY_SSL`
+- repository variable `FOD_SEVERITY_STRINGS`
+  Defaults to `Critical`. Use comma-separated values such as `Critical,High` when you want to widen scope.
 
 The workflow uses GitHub's built-in `GITHUB_TOKEN` for branch pushes and PR creation.
 
@@ -58,6 +60,8 @@ The combined workflow:
 - still supports `pull_request` events when you want PR comments from the Fortify action
 - supports manual `workflow_dispatch`; supply a branch if you want to override the selected branch
 - uses the numeric FoD release id for both scanning and remediation
+- defaults remediation to vulnerabilities with `FOD_SEVERITY_STRINGS=Critical`
+- can create more than one remediation pull request in a single run when multiple vulnerabilities qualify
 - requests the FoD OAuth scope `api-tenant` by default for remediation API calls
 - authenticates remediation token requests using the documented FoD form body fields for either `client_credentials` or `password`
 - skips fork-based PRs because the workflow relies on repository credentials
