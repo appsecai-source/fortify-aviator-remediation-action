@@ -3,7 +3,7 @@
 Reusable GitHub Action repository for Fortify on Demand scanning and Aviator remediation.
 
 It is designed to:
-- run Fortify on Demand scans through a reusable wrapper around `fortify/github-action`
+- run Fortify on Demand scans through a reusable wrapper around the Fortify AST Scan marketplace action, `fortify/github-action@v3`
 - authenticate to Fortify on Demand
 - fetch vulnerabilities for a configured release
 - request Aviator remediation guidance per finding
@@ -55,6 +55,29 @@ permissions:
   pull-requests: write
 ```
 
+## Repository FoD Workflow
+
+This repository now includes a self-scan workflow at `.github/workflows/fortify.yml`. It uses the local `./fod-scan` action to run the Fortify AST Scan marketplace integration against this action repository on `push`, `pull_request`, and `workflow_dispatch`.
+
+Required repository secrets:
+- `FOD_CLIENT_ID`
+- `FOD_CLIENT_SECRET`
+
+Optional repository secrets:
+- `FOD_TENANT`
+
+Useful repository variables:
+- `FOD_URL`
+- `FOD_RELEASE`
+- `FOD_PACKAGE_EXTRA_OPTS`
+- `FCLI_BOOTSTRAP_VERSION`
+- `FOD_DO_WAIT`
+- `FOD_DO_JOB_SUMMARY`
+- `FOD_DO_EXPORT`
+- `FOD_DO_SCA_SCAN`
+
+If `FOD_RELEASE` is not set, the workflow falls back to `repo:branch`, which mirrors the default behavior documented for the Fortify AST Scan action.
+
 ## Quick Start
 
 ```yaml
@@ -87,7 +110,7 @@ By default, the action does not assume any application language or build tool. V
 
 ## Fortify FoD Scan Action
 
-The scan action is published from the `fod-scan/` subdirectory. It wraps `fortify/github-action@v3` with a smaller, reusable input surface.
+The scan action is published from the `fod-scan/` subdirectory. It wraps the Fortify AST Scan marketplace action, `fortify/github-action@v3`, with a smaller, reusable input surface for FoD use cases.
 
 ### Scan Inputs
 
@@ -97,13 +120,17 @@ The scan action is published from the `fod-scan/` subdirectory. It wraps `fortif
 | `fod-client-id` | Yes | - | Fortify on Demand client ID. |
 | `fod-client-secret` | Yes | - | Fortify on Demand client secret. |
 | `fod-tenant` | No | `""` | Fortify tenant name. |
-| `fod-release-id` | Yes | - | Numeric Fortify release identifier. |
+| `fod-release` | Yes, unless `fod-release-id` is set | `""` | Preferred FoD release selector for the underlying `FOD_RELEASE` environment variable. This can be a numeric release id or a release name like `MyApp:main`. |
+| `fod-release-id` | Yes, unless `fod-release` is set | `""` | Backward-compatible alias for `fod-release`. Useful for existing workflows that already pass a numeric release id. |
 | `package-extra-opts` | No | `""` | Optional packaging options, for example `-bt mvn`, `-bt gradle`, or other Fortify packaging flags. |
+| `fcli-bootstrap-version` | No | `""` | Optional fcli bootstrap version, for example `v3.15.0`, if you want to pin the Fortify AST Scan runtime instead of floating with the latest supported v3 release. |
 | `do-wait` | No | `false` | Whether the scan should wait for FoD processing to finish. |
 | `do-job-summary` | No | `false` | Whether the Fortify action should publish a job summary. |
 | `do-export` | No | `false` | Whether to export findings to GitHub code scanning. |
 | `do-sca-scan` | No | `true` | Whether to include software composition analysis. |
 | `do-pr-comment` | No | `false` | Whether the Fortify action should comment on PRs. |
+
+This wrapper maps `fod-release` or `fod-release-id` to the official `FOD_RELEASE` environment variable expected by the Fortify AST Scan action.
 
 ### Minimal Scan Example
 
@@ -113,7 +140,7 @@ The scan action is published from the `fod-scan/` subdirectory. It wraps `fortif
   with:
     fod-client-id: ${{ secrets.FOD_CLIENT_ID }}
     fod-client-secret: ${{ secrets.FOD_CLIENT_SECRET }}
-    fod-release-id: ${{ secrets.FOD_RELEASE_ID }}
+    fod-release: ${{ secrets.FOD_RELEASE_ID }}
 ```
 
 ### Scan Example With Java Packaging
@@ -129,8 +156,9 @@ The scan action is published from the `fod-scan/` subdirectory. It wraps `fortif
   with:
     fod-client-id: ${{ secrets.FOD_CLIENT_ID }}
     fod-client-secret: ${{ secrets.FOD_CLIENT_SECRET }}
-    fod-release-id: ${{ secrets.FOD_RELEASE_ID }}
+    fod-release: ${{ secrets.FOD_RELEASE_ID }}
     package-extra-opts: "-bt mvn"
+    fcli-bootstrap-version: "v3.15.0"
     do-sca-scan: "true"
 ```
 
@@ -142,7 +170,7 @@ The scan action is published from the `fod-scan/` subdirectory. It wraps `fortif
   with:
     fod-client-id: ${{ secrets.FOD_CLIENT_ID }}
     fod-client-secret: ${{ secrets.FOD_CLIENT_SECRET }}
-    fod-release-id: ${{ secrets.FOD_RELEASE_ID }}
+    fod-release: ${{ secrets.FOD_RELEASE_ID }}
 ```
 
 ## Inputs
@@ -428,7 +456,7 @@ jobs:
         with:
           fod-client-id: ${{ secrets.FOD_CLIENT_ID }}
           fod-client-secret: ${{ secrets.FOD_CLIENT_SECRET }}
-          fod-release-id: ${{ secrets.FOD_RELEASE_ID }}
+          fod-release: ${{ secrets.FOD_RELEASE_ID }}
           package-extra-opts: "-bt mvn"
           do-pr-comment: ${{ github.event_name == 'pull_request' }}
 

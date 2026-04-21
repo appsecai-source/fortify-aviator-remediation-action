@@ -1,0 +1,48 @@
+name: Fortify FoD Scan
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      fod_release:
+        description: Optional FoD release override. Defaults to the FOD_RELEASE repository variable or repo:branch.
+        required: false
+        default: ""
+
+concurrency:
+  group: fortify-fod-${{ github.workflow }}-${{ github.head_ref || github.ref_name || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  fortify-fod:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      security-events: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Fortify AST Scan
+        uses: ./fod-scan
+        with:
+          fod-url: ${{ vars.FOD_URL || 'https://ams.fortify.com' }}
+          fod-client-id: ${{ secrets.FOD_CLIENT_ID }}
+          fod-client-secret: ${{ secrets.FOD_CLIENT_SECRET }}
+          fod-tenant: ${{ secrets.FOD_TENANT }}
+          fod-release: ${{ github.event.inputs.fod_release || vars.FOD_RELEASE || format('{0}:{1}', github.event.repository.name, github.head_ref || github.ref_name) }}
+          package-extra-opts: ${{ vars.FOD_PACKAGE_EXTRA_OPTS || '' }}
+          fcli-bootstrap-version: ${{ vars.FCLI_BOOTSTRAP_VERSION || '' }}
+          do-wait: ${{ vars.FOD_DO_WAIT || 'true' }}
+          do-job-summary: ${{ vars.FOD_DO_JOB_SUMMARY || 'true' }}
+          do-export: ${{ vars.FOD_DO_EXPORT || 'false' }}
+          do-sca-scan: ${{ vars.FOD_DO_SCA_SCAN || 'true' }}
+          do-pr-comment: ${{ github.event_name == 'pull_request' }}

@@ -1,5 +1,5 @@
-name: Fortify FoD Scan
-description: Run the Fortify on Demand scan action with a reusable, project-neutral wrapper.
+name: Fortify AST Scan (FoD)
+description: Run the Fortify AST Scan marketplace action for Fortify on Demand through a reusable, project-neutral wrapper.
 
 inputs:
   fod-url:
@@ -16,11 +16,20 @@ inputs:
     description: Fortify tenant name.
     required: false
     default: ""
+  fod-release:
+    description: Preferred FoD release selector for the underlying FOD_RELEASE environment variable. Can be a numeric release id or a release name like repo:branch.
+    required: false
+    default: ""
   fod-release-id:
-    description: Numeric Fortify release identifier.
-    required: true
+    description: Backward-compatible alias for fod-release. Can be a numeric release id.
+    required: false
+    default: ""
   package-extra-opts:
     description: Optional Fortify packaging options such as build tool selectors.
+    required: false
+    default: ""
+  fcli-bootstrap-version:
+    description: Optional fcli bootstrap version, for example v3.15.0, if you want to pin the Fortify AST Scan runtime.
     required: false
     default: ""
   do-wait:
@@ -47,6 +56,14 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Validate FoD inputs
+      shell: bash
+      run: |
+        if [ -z "${{ inputs.fod-release }}" ] && [ -z "${{ inputs.fod-release-id }}" ]; then
+          echo "Either 'fod-release' or 'fod-release-id' must be provided." >&2
+          exit 1
+        fi
+
     - name: Run Fortify on Demand scan
       uses: fortify/github-action@v3
       env:
@@ -54,7 +71,8 @@ runs:
         FOD_CLIENT_ID: ${{ inputs.fod-client-id }}
         FOD_CLIENT_SECRET: ${{ inputs.fod-client-secret }}
         FOD_TENANT: ${{ inputs.fod-tenant }}
-        FOD_RELEASE: ${{ inputs.fod-release-id }}
+        FOD_RELEASE: ${{ inputs.fod-release || inputs.fod-release-id }}
+        FCLI_BOOTSTRAP_VERSION: ${{ inputs.fcli-bootstrap-version }}
         PACKAGE_EXTRA_OPTS: ${{ inputs.package-extra-opts }}
         DO_WAIT: ${{ inputs.do-wait }}
         DO_JOB_SUMMARY: ${{ inputs.do-job-summary }}
