@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import difflib
+import hashlib
 import json
 import os
 import re
@@ -15,6 +16,11 @@ from typing import Any, Dict, Iterator, List, Sequence, Tuple
 import requests
 
 from fod_aviator import AviatorGuidance, FileRemediation, FoDAviatorClient, severity_rank
+from metrics import (
+    publish_remediation_metrics_markdown,
+    render_remediation_metrics_markdown,
+    summarize_remediation_outcomes,
+)
 
 
 class PatchApplyError(Exception):
@@ -82,6 +88,33 @@ def configured_severity_strings() -> List[str]:
 
 def normalize_repo_path(value: str) -> str:
     return Path(value).as_posix().lstrip("./")
+
+
+def remediation_group_key(vuln: Dict[str, Any]) -> Tuple[str, str]:
+    severity = str(vuln.get("severity") or "Unknown").strip() or "Unknown"
+    category = str(vuln.get("category") or "Uncategorized").strip() or "Uncategorized"
+    return severity, category
+
+
+def slugify_branch_component(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", value.strip().lower()).strip("-")
+    return slug or "group"
+
+
+def remediation_group_branch_name(severity: str, category: str) -> str:
+    severity_slug = slugify_branch_component(severity)
+    category_slug = slugify_branch_component(category)
+    base = f"{FIX_BRANCH_PREFIX}{severity_slug}-{category_slug}"
+    if len(base) <= 120:
+        return base
+
+    digest = hashlib.sha1(f"{severity}|{category}".encode("utf-8")).hexdigest()[:12]
+    trimmed = base[: 120 - len(digest) - 1].rstrip("-")
+    return f"{trimmed}-{digest}"
+
+
+def remediation_group_title(severity: str, category: str) -> str:
+    return f"[AUTO] Fortify Aviator fixes for {severity} - {category}"
 
 
 def parse_github_repository(value: str) -> str:
@@ -251,6 +284,20 @@ def github_find_pull_request(repo: str, token: str, head: str, base: str, state:
     return None
 
 
+def github_update_pull_request(repo: str, token: str, pr_number: int, title: str, body: str) -> Dict[str, Any]:
+    owner, name = repo.split("/", 1)
+    url = f"https://api.github.com/repos/{owner}/{name}/pulls/{pr_number}"
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
+    response = requests.patch(
+        url,
+        headers=headers,
+        json={"title": title, "body": body},
+        timeout=60,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
 def compute_exploitability(vuln: Dict[str, Any], guidance: AviatorGuidance, changed_files: Sequence[str]) -> float:
     score = 0.0
     score += min(severity_rank(vuln["severity"]) / 5.0, 1.0) * 0.35
@@ -264,7 +311,7 @@ def compute_exploitability(vuln: Dict[str, Any], guidance: AviatorGuidance, chan
     if vuln.get("line"):
         score += 0.10
 
-    confidence = vuln.get("confidence_normalized", "unknown")
+    confidence = remediation_confidence(vuln, guidance)
     if confidence == "high":
         score += 0.20
     elif confidence == "medium":
@@ -293,6 +340,13 @@ def compute_exploitability(vuln: Dict[str, Any], guidance: AviatorGuidance, chan
     return round(min(score, 1.0), 2)
 
 
+def remediation_confidence(vuln: Dict[str, Any], guidance: AviatorGuidance | None) -> str:
+    confidence = vuln.get("confidence_normalized", "unknown")
+    if confidence == "pending_review" and guidance is not None and guidance.file_changes:
+        return "medium"
+    return confidence
+
+
 def quality_gate_check(
     gate: QualityGate,
     vuln: Dict[str, Any],
@@ -300,9 +354,17 @@ def quality_gate_check(
     changed_files: Sequence[str],
 ) -> Tuple[bool, List[str], float]:
     reasons: List[str] = []
+    confidence = remediation_confidence(vuln, guidance)
+    auditor_status = vuln.get("auditor_status", "Unknown")
 
     if severity_rank(vuln["severity"]) < gate.min_severity_rank:
         reasons.append(f"severity gate failed: {vuln['severity']}")
+
+    if confidence == "false_positive":
+        reasons.append(f"auditor status indicates false positive: {auditor_status}")
+
+    if confidence == "manual_intervention":
+        reasons.append(f"auditor status requires manual intervention: {auditor_status}")
 
     if gate.require_guidance_available and guidance is None:
         reasons.append("Remediation Guidance is not available")
@@ -382,6 +444,21 @@ def generate_file_diff(before_text: str, after_text: str, filename: str) -> str:
             tofile=f"b/{normalized}",
         )
     )
+
+
+def git_diff_for_files(repo_root: Path, files: Sequence[str]) -> List[str]:
+    normalized_files = sorted({normalize_repo_path(filename) for filename in files if filename})
+    if not normalized_files:
+        return []
+
+    result = subprocess.run(
+        ["git", "diff", "--", *normalized_files],
+        cwd=repo_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return [result.stdout] if result.stdout.strip() else []
 
 
 def configured_git_identity() -> Tuple[str, str]:
@@ -551,28 +628,79 @@ def open_pull_request(repo: str, token: str, head: str, base: str, title: str, b
     return response.json()
 
 
-def remediation_body(vuln: Dict[str, Any], guidance: AviatorGuidance, exploitability: float, diffs: List[str]) -> str:
+def grouped_remediation_body(
+    vulns: Sequence[Dict[str, Any]],
+    guidance_by_vuln_id: Dict[str, AviatorGuidance],
+    exploitability_by_vuln_id: Dict[str, float],
+    diffs: List[str],
+    skipped_vulns: Sequence[Dict[str, str]],
+) -> str:
+    if not vulns:
+        raise RuntimeError("Cannot build remediation body without vulnerabilities")
+
     combined_diff = "\n".join(diffs)[:50000]
-    updated_files = "\n".join(f"- {normalize_repo_path(file_change.filename)}" for file_change in guidance.file_changes)
+    severity, category = remediation_group_key(vulns[0])
+    updated_files = sorted(
+        {
+            normalize_repo_path(file_change.filename)
+            for vuln in vulns
+            for file_change in guidance_by_vuln_id[str(vuln["vuln_id"])].file_changes
+        }
+    )
+    finding_lines = "\n".join(
+        (
+            f"- {vuln['vuln_id']} | {normalize_repo_path(str(vuln.get('file_path') or '(not set)'))}:"
+            f"{vuln.get('line') or 0} | confidence={vuln['confidence']} | "
+            f"exploitability={exploitability_by_vuln_id[str(vuln['vuln_id'])]}"
+        )
+        for vuln in vulns
+    )
+    analysis_sections = "\n\n".join(
+        (
+            f"### Vulnerability {vuln['vuln_id']}\n"
+            f"{guidance_by_vuln_id[str(vuln['vuln_id'])].audit_comment or '(No audit comment provided)'}"
+        )
+        for vuln in vulns
+    )
+    traceability_lines = "\n".join(
+        (
+            f"- {vuln['vuln_id']} | instanceId="
+            f"{guidance_by_vuln_id[str(vuln['vuln_id'])].instance_id or '(not set)'} | writeDate="
+            f"{guidance_by_vuln_id[str(vuln['vuln_id'])].write_date or '(not set)'}"
+        )
+        for vuln in vulns
+    )
+    skipped_section = ""
+    if skipped_vulns:
+        skipped_lines = "\n".join(
+            f"- {item['vulnerability']}: {item['reason']}" for item in skipped_vulns
+        )
+        skipped_section = f"""
+**Skipped Vulnerabilities In This Group**
+{skipped_lines}
+"""
+
+    updated_file_lines = "\n".join(f"- {filename}" for filename in updated_files)
+
     return f"""## Automated Fortify Aviator remediation PR
 
-**Finding**
-- Vulnerability Id: {vuln['vuln_id']}
-- Category: {vuln['category']}
-- Severity: {vuln['severity']}
-- Confidence: {vuln['confidence']}
-- File: {vuln['file_path']}:{vuln['line']}
-- Exploitability score: {exploitability}
+**Group**
+- Severity: {severity}
+- Category: {category}
+- Included vulnerabilities: {len(vulns)}
+
+**Findings**
+{finding_lines}
 
 **Aviator analysis**
-{guidance.audit_comment}
+{analysis_sections}
 
 **Updated files**
-{updated_files}
+{updated_file_lines}
 
 **Traceability**
-- Aviator instanceId: {guidance.instance_id}
-- Guidance writeDate: {guidance.write_date}
+{traceability_lines}
+{skipped_section}
 
 **Generated patch**
 ```diff
@@ -597,6 +725,26 @@ def error_summary(vuln: Dict[str, Any], error: Exception) -> Dict[str, Any]:
     }
 
 
+def classify_skip_outcome(reasons: Sequence[str], guidance: AviatorGuidance | None) -> str:
+    lowered_reasons = [str(reason).strip().lower() for reason in reasons]
+
+    if any("false positive" in reason for reason in lowered_reasons):
+        return "false_positive"
+    if any("manual intervention" in reason for reason in lowered_reasons):
+        return "manual_intervention"
+    if guidance is None or any("guidance is not available" in reason for reason in lowered_reasons):
+        return "no_fix_suggestion"
+    if any("no structured filechanges returned" in reason for reason in lowered_reasons):
+        return "no_fix_suggestion"
+    if any("severity gate failed" in reason for reason in lowered_reasons):
+        return "severity_filtered_out"
+    if any("target files not in pr scope" in reason for reason in lowered_reasons):
+        return "out_of_scope"
+    if any("multi-file changes not allowed" in reason for reason in lowered_reasons):
+        return "policy_skipped"
+    return "other_skipped"
+
+
 def run() -> None:
     load_local_env_file()
     repo_root = Path(os.environ.get("GITHUB_WORKSPACE") or Path(__file__).resolve().parents[2]).resolve()
@@ -607,7 +755,15 @@ def run() -> None:
     base_branch = resolve_base_branch(repo_root, repo, token, pr_number)
 
     client = FoDAviatorClient.from_env()
+    raw_severity_strings = os.environ.get("FOD_SEVERITY_STRINGS")
     severity_strings = configured_severity_strings()
+    severity_source = "env" if raw_severity_strings is not None else "default"
+    raw_severity_display = raw_severity_strings if raw_severity_strings is not None else "Critical"
+    normalized_severity_display = ",".join(severity_strings) if severity_strings else "(none)"
+    print(
+        f"Effective FOD_SEVERITY_STRINGS ({severity_source}): "
+        f"raw='{raw_severity_display}' normalized='{normalized_severity_display}'"
+    )
     raw_vulns = client.iter_vulnerabilities(
         fortify_aviator=True,
         severity_strings=severity_strings,
@@ -616,66 +772,190 @@ def run() -> None:
     gate = QualityGate(require_changed_file=bool(changed_files))
 
     decisions: List[Dict[str, Any]] = []
+    grouped_candidates: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+    metrics_records: Dict[str, Dict[str, Any]] = {}
 
     for raw_vuln in raw_vulns:
         vuln = client.normalize_vulnerability(raw_vuln)
         if not vuln["vuln_id"]:
             continue
 
+        vuln_id = str(vuln["vuln_id"])
         guidance_payload = client.get_aviator_guidance(int(vuln["vuln_id"]))
         guidance = client.parse_aviator_guidance(guidance_payload)
         passed, reasons, exploitability = quality_gate_check(gate, vuln, guidance, changed_files)
+        metrics_records[vuln_id] = {
+            "vulnerability": vuln_id,
+            "severity": str(vuln.get("severity") or "Unknown"),
+            "category": str(vuln.get("category") or "Uncategorized"),
+            "auditor_status": str(vuln.get("auditor_status") or "Unknown"),
+            "guidance_available": guidance is not None,
+            "structured_fix_available": bool(guidance and guidance.file_changes),
+            "eligible": False,
+            "outcome": "",
+            "detail": "",
+        }
 
         if not guidance:
+            metrics_records[vuln_id]["outcome"] = "no_fix_suggestion"
+            metrics_records[vuln_id]["detail"] = "Remediation Guidance is not available"
             decisions.append(comment_only_summary(vuln, reasons or ["Remediation Guidance is not available"]))
             continue
 
         if not passed:
+            metrics_records[vuln_id]["outcome"] = classify_skip_outcome(reasons, guidance)
+            metrics_records[vuln_id]["detail"] = "; ".join(reasons)
             decisions.append(comment_only_summary(vuln, reasons))
             continue
 
-        branch_name = f"fortify-aviator-fix-{vuln['vuln_id']}"
-        commit_message = f"fix: Fortify Aviator remediation for vulnerability {vuln['vuln_id']}"
+        metrics_records[vuln_id]["eligible"] = True
+        metrics_records[vuln_id]["outcome"] = "eligible"
+        grouped_candidates.setdefault(remediation_group_key(vuln), []).append(
+            {
+                "vuln": vuln,
+                "guidance": guidance,
+                "exploitability": exploitability,
+            }
+        )
+
+    for (severity, category), candidates in grouped_candidates.items():
+        branch_name = remediation_group_branch_name(severity, category)
+        commit_message = f"fix: Fortify Aviator remediations for {severity} {category}"
+        title = remediation_group_title(severity, category)
+        included_vulns: List[Dict[str, Any]] = []
+        guidance_by_vuln_id: Dict[str, AviatorGuidance] = {}
+        exploitability_by_vuln_id: Dict[str, float] = {}
+        skipped_vulns: List[Dict[str, str]] = []
+
         try:
-            with remediation_worktree(repo_root, base_branch, str(vuln["vuln_id"])) as worktree_root:
-                all_diffs: List[str] = []
+            with remediation_worktree(repo_root, base_branch, f"{severity}-{category}") as worktree_root:
                 applied_files: List[str] = []
 
-                for file_change in guidance.file_changes:
-                    before_text, after_text = apply_file_remediation(worktree_root, file_change)
-                    diff_text = generate_file_diff(before_text, after_text, file_change.filename)
-                    if not diff_text.strip():
-                        raise PatchApplyError(f"No diff produced for {file_change.filename}")
-                    all_diffs.append(diff_text)
-                    applied_files.append(file_change.filename)
+                for candidate in candidates:
+                    vuln = candidate["vuln"]
+                    guidance = candidate["guidance"]
+                    exploitability = candidate["exploitability"]
+                    vuln_original_contents: Dict[str, str] = {}
+                    vuln_applied_files: List[str] = []
 
-                create_branch_and_commit(worktree_root, branch_name, commit_message, applied_files)
+                    try:
+                        for file_change in guidance.file_changes:
+                            filename = file_change.filename
+                            if filename not in vuln_original_contents:
+                                vuln_original_contents[filename] = resolve_target_path(
+                                    worktree_root, filename
+                                ).read_text(encoding="utf-8")
 
+                            before_text, after_text = apply_file_remediation(worktree_root, file_change)
+                            diff_text = generate_file_diff(before_text, after_text, file_change.filename)
+                            if not diff_text.strip():
+                                raise PatchApplyError(f"No diff produced for {file_change.filename}")
+                            vuln_applied_files.append(filename)
+                    except PatchApplyError as exc:
+                        restore_files(worktree_root, vuln_original_contents)
+                        metrics_records[str(vuln["vuln_id"])]["outcome"] = "patch_apply_failure"
+                        metrics_records[str(vuln["vuln_id"])]["detail"] = str(exc)
+                        skipped_vulns.append(
+                            {
+                                "vulnerability": str(vuln["vuln_id"]),
+                                "reason": str(exc),
+                            }
+                        )
+                        continue
+
+                    included_vulns.append(vuln)
+                    guidance_by_vuln_id[str(vuln["vuln_id"])] = guidance
+                    exploitability_by_vuln_id[str(vuln["vuln_id"])] = exploitability
+                    applied_files.extend(vuln_applied_files)
+
+                unique_applied_files = sorted({normalize_repo_path(filename) for filename in applied_files})
+                if not included_vulns or not unique_applied_files:
+                    if skipped_vulns:
+                        for skipped in skipped_vulns:
+                            decisions.append(
+                                comment_only_summary(
+                                    {"vuln_id": skipped["vulnerability"]},
+                                    [skipped["reason"]],
+                                )
+                            )
+                    continue
+
+                all_diffs = git_diff_for_files(worktree_root, unique_applied_files)
+                if not all_diffs:
+                    raise RuntimeError(f"No grouped diff produced for {severity} / {category}")
+
+                create_branch_and_commit(worktree_root, branch_name, commit_message, unique_applied_files)
+
+            body = grouped_remediation_body(
+                included_vulns,
+                guidance_by_vuln_id,
+                exploitability_by_vuln_id,
+                all_diffs,
+                skipped_vulns,
+            )
             pull_request = open_pull_request(
                 repo=repo,
                 token=token,
                 head=branch_name,
                 base=base_branch,
-                title=f"[AUTO] Fortify Aviator fix for {vuln['category']}",
-                body=remediation_body(vuln, guidance, exploitability, all_diffs),
+                title=title,
+                body=body,
             )
+            if pull_request.get("_existing"):
+                pull_request = github_update_pull_request(repo, token, int(pull_request["number"]), title, body)
+                pull_request["_existing"] = True
+            for vuln in included_vulns:
+                metrics_records[str(vuln["vuln_id"])]["outcome"] = "autofix_applied"
+                metrics_records[str(vuln["vuln_id"])]["detail"] = pull_request.get("html_url", "")
             decisions.append(
                 {
                     "status": "pr_already_exists" if pull_request.get("_existing") else "pr_created",
-                    "vulnerability": vuln["vuln_id"],
-                    "files": [normalize_repo_path(filename) for filename in applied_files],
-                    "exploitability": exploitability,
+                    "severity": severity,
+                    "category": category,
+                    "vulnerabilities": [vuln["vuln_id"] for vuln in included_vulns],
+                    "skipped_vulnerabilities": skipped_vulns,
+                    "files": sorted(
+                        {
+                            normalize_repo_path(file_change.filename)
+                            for guidance in guidance_by_vuln_id.values()
+                            for file_change in guidance.file_changes
+                        }
+                    ),
                     "pull_request": pull_request.get("html_url"),
                 }
             )
-        except PatchApplyError as exc:
-            decisions.append(comment_only_summary(vuln, [str(exc)]))
-            continue
         except (requests.HTTPError, subprocess.CalledProcessError, RuntimeError) as exc:
-            decisions.append(error_summary(vuln, exc))
+            decisions.append(
+                {
+                    "severity": severity,
+                    "category": category,
+                    "vulnerabilities": [candidate["vuln"]["vuln_id"] for candidate in candidates],
+                    "status": "error",
+                    "error": str(exc),
+                }
+            )
+            for candidate in candidates:
+                vuln_id = str(candidate["vuln"]["vuln_id"])
+                if metrics_records.get(vuln_id, {}).get("outcome") in {"patch_apply_failure", "autofix_applied"}:
+                    continue
+                metrics_records[vuln_id]["outcome"] = "fix_failure"
+                metrics_records[vuln_id]["detail"] = str(exc)
             continue
 
-    print(json.dumps({"results": decisions or [{"status": "no eligible remediation candidate found"}]}, indent=2))
+    metrics = summarize_remediation_outcomes(metrics_records.values(), decisions)
+    metrics_markdown = render_remediation_metrics_markdown(metrics)
+    summary_path = publish_remediation_metrics_markdown(metrics_markdown)
+    print(
+        json.dumps(
+            {
+                "metrics": metrics,
+                "metrics_markdown": metrics_markdown,
+                "metrics_published_to": summary_path or None,
+                "results": decisions or [{"status": "no eligible remediation candidate found"}],
+            },
+            indent=2,
+        )
+    )
 
 
 if __name__ == "__main__":

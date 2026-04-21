@@ -248,12 +248,15 @@ class FoDAviatorClient:
     @staticmethod
     def normalize_vulnerability(vulnerability: Dict[str, Any]) -> Dict[str, Any]:
         severity = vulnerability.get("severityString") or vulnerability.get("severity") or "Unknown"
-        confidence = (
+        auditor_status = str(vulnerability.get("auditorStatus") or "").strip()
+        legacy_confidence = (
             vulnerability.get("confidence")
             or vulnerability.get("accuracy")
             or vulnerability.get("priorityOrder")
             or "Unknown"
         )
+        confidence = auditor_status or str(legacy_confidence)
+        confidence_normalized = normalize_confidence(auditor_status, str(legacy_confidence))
         return {
             # The remediation-guidance endpoint expects the numeric vulnerability id from the
             # release findings payload, not the GUID-style vulnId field.
@@ -266,7 +269,8 @@ class FoDAviatorClient:
             "line": int(vulnerability.get("lineNumber") or vulnerability.get("line") or 0),
             "cwe": vulnerability.get("cwe") or vulnerability.get("cweId"),
             "confidence": str(confidence),
-            "confidence_normalized": normalize_confidence(str(confidence)),
+            "confidence_normalized": confidence_normalized,
+            "auditor_status": auditor_status or "Unknown",
             "remediation_guidance_available": bool(
                 vulnerability.get("aviatorRemediationGuidanceAvailable")
                 if "aviatorRemediationGuidanceAvailable" in vulnerability
@@ -337,7 +341,7 @@ def severity_rank(severity: str) -> int:
     return mapping.get(str(severity).strip().lower(), 0)
 
 
-def normalize_confidence(value: str) -> str:
+def normalize_legacy_confidence(value: str) -> str:
     lowered = str(value or "").strip().lower()
     if lowered in {"5", "high", "confirmed", "true_positive", "tp"}:
         return "high"
@@ -346,3 +350,20 @@ def normalize_confidence(value: str) -> str:
     if lowered in {"3", "low", "suspicious"}:
         return "low"
     return lowered or "unknown"
+
+
+def normalize_confidence(auditor_status: str, fallback_value: str = "") -> str:
+    normalized_status = " ".join(str(auditor_status or "").strip().lower().split())
+
+    if normalized_status == "remediation required":
+        return "high"
+    if normalized_status == "suspicious":
+        return "medium"
+    if normalized_status == "proposed not an issue":
+        return "false_positive"
+    if normalized_status in {"remediation deferred", "remediation deffered", "risk mitigated"}:
+        return "manual_intervention"
+    if normalized_status == "pending review":
+        return "pending_review"
+
+    return normalize_legacy_confidence(fallback_value)
