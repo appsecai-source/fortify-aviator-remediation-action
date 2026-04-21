@@ -103,7 +103,7 @@ def configured_allowed_severities(severity_strings: Sequence[str]) -> Tuple[str,
 
 
 def configured_pr_grouping_mode() -> str:
-    raw_value = os.environ.get("FOD_PR_GROUPING", "issue").strip().lower()
+    raw_value = os.environ.get("FOD_PR_GROUPING", "category").strip().lower()
     if raw_value not in VALID_PR_GROUPING_MODES:
         allowed = ", ".join(sorted(VALID_PR_GROUPING_MODES))
         raise RuntimeError(f"Unsupported FOD_PR_GROUPING value: {raw_value}. Allowed values: {allowed}")
@@ -1165,6 +1165,7 @@ def run() -> None:
                     vuln = candidate["vuln"]
                     guidance = candidate["guidance"]
                     exploitability = candidate["exploitability"]
+                    vuln_id = str(vuln["vuln_id"])
                     vuln_original_contents: Dict[str, str] = {}
                     vuln_applied_files: List[str] = []
 
@@ -1183,19 +1184,42 @@ def run() -> None:
                             vuln_applied_files.append(filename)
                     except PatchApplyError as exc:
                         restore_files(worktree_root, vuln_original_contents)
-                        metrics_records[str(vuln["vuln_id"])]["outcome"] = "patch_apply_failure"
-                        metrics_records[str(vuln["vuln_id"])]["detail"] = str(exc)
+                        reason = truncate_text(" ".join(str(exc).split()), 600, "skip reason")
+                        metrics_records[vuln_id]["outcome"] = "patch_apply_failure"
+                        metrics_records[vuln_id]["detail"] = str(exc)
                         skipped_vulns.append(
                             {
-                                "vulnerability": str(vuln["vuln_id"]),
-                                "reason": str(exc),
+                                "vulnerability": vuln_id,
+                                "reason": reason,
                             }
                         )
                         continue
 
+                    if pr_grouping_mode == "category":
+                        candidate_validation_files = sorted(
+                            {
+                                normalize_repo_path(filename)
+                                for filename in [*applied_files, *vuln_applied_files]
+                            }
+                        )
+                        try:
+                            validate_remediation_changes(worktree_root, candidate_validation_files)
+                        except RuntimeError as exc:
+                            restore_files(worktree_root, vuln_original_contents)
+                            reason = truncate_text(" ".join(str(exc).split()), 600, "skip reason")
+                            metrics_records[vuln_id]["outcome"] = "validation_failure"
+                            metrics_records[vuln_id]["detail"] = str(exc)
+                            skipped_vulns.append(
+                                {
+                                    "vulnerability": vuln_id,
+                                    "reason": reason,
+                                }
+                            )
+                            continue
+
                     included_vulns.append(vuln)
-                    guidance_by_vuln_id[str(vuln["vuln_id"])] = guidance
-                    exploitability_by_vuln_id[str(vuln["vuln_id"])] = exploitability
+                    guidance_by_vuln_id[vuln_id] = guidance
+                    exploitability_by_vuln_id[vuln_id] = exploitability
                     applied_files.extend(vuln_applied_files)
 
                 unique_applied_files = sorted({normalize_repo_path(filename) for filename in applied_files})
@@ -1261,14 +1285,21 @@ def run() -> None:
                 {
                     "severity": severity,
                     "category": category,
-                    "vulnerabilities": [candidate["vuln"]["vuln_id"] for candidate in candidates],
+                    "vulnerabilities": [
+                        vuln["vuln_id"] for vuln in included_vulns
+                    ] if included_vulns else [candidate["vuln"]["vuln_id"] for candidate in candidates],
+                    "skipped_vulnerabilities": skipped_vulns,
                     "status": "error",
                     "error": str(exc),
                 }
             )
             for candidate in candidates:
                 vuln_id = str(candidate["vuln"]["vuln_id"])
-                if metrics_records.get(vuln_id, {}).get("outcome") in {"patch_apply_failure", "autofix_applied"}:
+                if metrics_records.get(vuln_id, {}).get("outcome") in {
+                    "patch_apply_failure",
+                    "validation_failure",
+                    "autofix_applied",
+                }:
                     continue
                 metrics_records[vuln_id]["outcome"] = "fix_failure"
                 metrics_records[vuln_id]["detail"] = str(exc)

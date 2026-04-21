@@ -276,6 +276,7 @@ def _bucket_label_for_outcome(outcome: str) -> str:
         "false_positive": "False positive",
         "manual_intervention": "Manual intervention required",
         "patch_apply_failure": "Patch apply failure",
+        "validation_failure": "Validation failure",
         "fix_failure": "PR publication failure",
         "out_of_scope": "Out of scope",
         "policy_skipped": "Policy skipped",
@@ -474,7 +475,7 @@ def render_result_summary_markdown(result_summary: Mapping[str, Any]) -> str:
     lines = [
         "### PR Activity",
         "",
-        "| Result | Severity | Category | Included | Skipped During Apply | Reference |",
+        "| Result | Severity | Category | Included | Skipped While Preparing PR | Reference |",
         "| --- | --- | --- | ---: | ---: | --- |",
     ]
     if pr_activity:

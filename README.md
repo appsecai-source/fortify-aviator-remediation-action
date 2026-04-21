@@ -37,7 +37,7 @@ Optional:
 - repository variable `FOD_SEVERITY_STRINGS`
   Defaults to `Critical`. Use comma-separated values such as `Critical,High` when you want to widen scope.
 - repository variable `FOD_PR_GROUPING`
-  Defaults to `issue`. Use `category` to aggregate eligible vulnerabilities with the same severity and category into one PR.
+  Defaults to `category`. Use `issue` when you want one remediation PR per eligible vulnerability.
 
 The workflow uses GitHub's built-in `GITHUB_TOKEN` for branch pushes and PR creation.
 
@@ -63,8 +63,8 @@ The combined workflow:
 - supports manual `workflow_dispatch`; supply a branch if you want to override the selected branch
 - uses the numeric FoD release id for both scanning and remediation
 - defaults remediation to vulnerabilities with `FOD_SEVERITY_STRINGS=Critical`
-- defaults remediation PR creation to one pull request per issue with `FOD_PR_GROUPING=issue`
-- can optionally group eligible vulnerabilities with the same severity and category into the same remediation pull request with `FOD_PR_GROUPING=category`
+- defaults remediation PR creation to grouped pull requests by severity and category with `FOD_PR_GROUPING=category`
+- can optionally switch to one pull request per issue with `FOD_PR_GROUPING=issue`
 - requests the FoD OAuth scope `api-tenant` by default for remediation API calls
 - authenticates remediation token requests using the documented FoD form body fields for either `client_credentials` or `password`
 - skips fork-based PRs because the workflow relies on repository credentials
