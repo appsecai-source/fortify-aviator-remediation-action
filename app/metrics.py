@@ -263,6 +263,8 @@ def synthesize_remediation_metrics(metrics: Mapping[str, Any]) -> Dict[str, Any]
         "autofix_success_rate_pct": _pct(applied, eligible),
         "pr_groups_published": pr_groups_published,
         "pr_group_errors": pr_group_errors,
+        "remediation_prs_published": pr_groups_published,
+        "remediation_pr_errors": pr_group_errors,
         "top_blockers": top_blockers,
     }
 
@@ -421,7 +423,7 @@ def render_remediation_metrics_markdown(metrics: Mapping[str, Any]) -> str:
         f"- Reviewed **{total_findings}** findings.",
         f"- Aviator returned fix suggestions for **{guidance_available}** findings ({_fmt_pct(guidance_available, total_findings)} of all findings).",
         f"- **{eligible}** findings were eligible for autofix, and **{applied}** were applied ({_fmt_pct(applied, eligible)} success on eligible findings).",
-        f"- Published **{pr_groups_published}** remediation PR groups; **{pr_group_errors}** groups still failed during PR creation or update.",
+        f"- Published **{pr_groups_published}** remediation PRs; **{pr_group_errors}** PR publications still failed during creation or update.",
         f"- Main blockers were {blocker_text}.",
         "",
         "### Remediation Funnel",
@@ -444,7 +446,7 @@ def render_remediation_metrics_markdown(metrics: Mapping[str, Any]) -> str:
         "",
         "### Severity Breakdown",
         "",
-        "| Severity | Findings | Eligible | Fixed | Success On Eligible | No Suggestion | Patch Failures | Fix Failures | PR Groups |",
+        "| Severity | Findings | Eligible | Fixed | Success On Eligible | No Suggestion | Patch Failures | Fix Failures | PRs |",
         "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
 

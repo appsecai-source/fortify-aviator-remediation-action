@@ -47,6 +47,7 @@ VALID_SEVERITY_STRINGS = {
     "medium": "Medium",
     "low": "Low",
 }
+VALID_PR_GROUPING_MODES = {"issue", "category"}
 FIX_BRANCH_PREFIX = "fortify-aviator-fix-"
 GITHUB_PR_BODY_MAX_CHARS = 65536
 
@@ -101,6 +102,14 @@ def configured_allowed_severities(severity_strings: Sequence[str]) -> Tuple[str,
     return tuple(allowed)
 
 
+def configured_pr_grouping_mode() -> str:
+    raw_value = os.environ.get("FOD_PR_GROUPING", "issue").strip().lower()
+    if raw_value not in VALID_PR_GROUPING_MODES:
+        allowed = ", ".join(sorted(VALID_PR_GROUPING_MODES))
+        raise RuntimeError(f"Unsupported FOD_PR_GROUPING value: {raw_value}. Allowed values: {allowed}")
+    return raw_value
+
+
 def normalize_repo_path(value: str) -> str:
     return Path(value).as_posix().lstrip("./")
 
@@ -109,6 +118,13 @@ def remediation_group_key(vuln: Dict[str, Any]) -> Tuple[str, str]:
     severity = str(vuln.get("severity") or "Unknown").strip() or "Unknown"
     category = str(vuln.get("category") or "Uncategorized").strip() or "Uncategorized"
     return severity, category
+
+
+def remediation_batch_key(vuln: Dict[str, Any], grouping_mode: str) -> Tuple[str, str, str]:
+    severity, category = remediation_group_key(vuln)
+    if grouping_mode == "category":
+        return severity, category, "category"
+    return severity, category, str(vuln.get("vuln_id") or "unknown")
 
 
 def slugify_branch_component(value: str) -> str:
@@ -130,6 +146,41 @@ def remediation_group_branch_name(severity: str, category: str) -> str:
 
 def remediation_group_title(severity: str, category: str) -> str:
     return f"[AUTO] Fortify Aviator fixes for {severity} - {category}"
+
+
+def remediation_issue_branch_name(vuln: Dict[str, Any]) -> str:
+    return f"{FIX_BRANCH_PREFIX}{vuln['vuln_id']}"
+
+
+def remediation_issue_title(vuln: Dict[str, Any]) -> str:
+    return f"[AUTO] Fortify Aviator fix for {vuln['category']} ({vuln['vuln_id']})"
+
+
+def remediation_batch_branch_name(vulns: Sequence[Dict[str, Any]], grouping_mode: str) -> str:
+    if not vulns:
+        raise RuntimeError("Cannot build remediation branch name without vulnerabilities")
+    if grouping_mode == "category":
+        severity, category = remediation_group_key(vulns[0])
+        return remediation_group_branch_name(severity, category)
+    return remediation_issue_branch_name(vulns[0])
+
+
+def remediation_batch_title(vulns: Sequence[Dict[str, Any]], grouping_mode: str) -> str:
+    if not vulns:
+        raise RuntimeError("Cannot build remediation title without vulnerabilities")
+    if grouping_mode == "category":
+        severity, category = remediation_group_key(vulns[0])
+        return remediation_group_title(severity, category)
+    return remediation_issue_title(vulns[0])
+
+
+def remediation_batch_worktree_name(vulns: Sequence[Dict[str, Any]], grouping_mode: str) -> str:
+    if not vulns:
+        raise RuntimeError("Cannot build remediation worktree name without vulnerabilities")
+    if grouping_mode == "category":
+        severity, category = remediation_group_key(vulns[0])
+        return f"{severity}-{category}"
+    return str(vulns[0]["vuln_id"])
 
 
 def parse_github_repository(value: str) -> str:
@@ -737,6 +788,7 @@ def render_grouped_remediation_body(
     exploitability_by_vuln_id: Dict[str, float],
     diffs: List[str],
     skipped_vulns: Sequence[Dict[str, str]],
+    grouping_mode: str,
     *,
     max_finding_lines: int,
     max_updated_files: int,
@@ -747,6 +799,15 @@ def render_grouped_remediation_body(
     max_diff_chars: int,
 ) -> str:
     severity, category = remediation_group_key(vulns[0])
+    is_category_group = grouping_mode == "category"
+    scope_heading = "Group" if is_category_group else "Issue"
+    scope_count_label = "Included vulnerabilities" if is_category_group else "Vulnerability ID"
+    scope_count_value = str(len(vulns)) if is_category_group else str(vulns[0]["vuln_id"])
+    skipped_heading = (
+        "Skipped Vulnerabilities In This Group"
+        if is_category_group
+        else "Skipped Findings While Preparing This PR"
+    )
     updated_files = sorted(
         {
             normalize_repo_path(file_change.filename)
@@ -796,7 +857,7 @@ def render_grouped_remediation_body(
             "skipped vulnerabilities",
         )
         skipped_section = f"""
-**Skipped Vulnerabilities In This Group**
+**{skipped_heading}**
 {skipped_lines}
 """
 
@@ -809,10 +870,10 @@ def render_grouped_remediation_body(
 
     return f"""## Automated Fortify Aviator remediation PR
 
-**Group**
+**{scope_heading}**
 - Severity: {severity}
 - Category: {category}
-- Included vulnerabilities: {len(vulns)}
+- {scope_count_label}: {scope_count_value}
 
 **Findings**
 {finding_lines}
@@ -840,6 +901,7 @@ def grouped_remediation_body(
     exploitability_by_vuln_id: Dict[str, float],
     diffs: List[str],
     skipped_vulns: Sequence[Dict[str, str]],
+    grouping_mode: str,
 ) -> str:
     if not vulns:
         raise RuntimeError("Cannot build remediation body without vulnerabilities")
@@ -881,12 +943,23 @@ def grouped_remediation_body(
             exploitability_by_vuln_id,
             diffs,
             skipped_vulns,
+            grouping_mode,
             **variant,
         )
         if len(body) <= GITHUB_PR_BODY_MAX_CHARS:
             return body
 
     severity, category = remediation_group_key(vulns[0])
+    is_category_group = grouping_mode == "category"
+    scope_heading = "Group" if is_category_group else "Issue"
+    scope_count_label = "Included vulnerabilities" if is_category_group else "Vulnerability ID"
+    scope_count_value = str(len(vulns)) if is_category_group else str(vulns[0]["vuln_id"])
+    included_ids_heading = "Included vulnerability ids" if is_category_group else "Vulnerability id"
+    skipped_heading = (
+        "Skipped Vulnerabilities In This Group"
+        if is_category_group
+        else "Skipped Findings While Preparing This PR"
+    )
     included_ids = ", ".join(str(vuln["vuln_id"]) for vuln in vulns[:20])
     if len(vulns) > 20:
         included_ids = f"{included_ids}, ... (+{len(vulns) - 20} more)"
@@ -908,18 +981,18 @@ def grouped_remediation_body(
     )
     return f"""## Automated Fortify Aviator remediation PR
 
-**Group**
+**{scope_heading}**
 - Severity: {severity}
 - Category: {category}
-- Included vulnerabilities: {len(vulns)}
+- {scope_count_label}: {scope_count_value}
 
-**Included vulnerability ids**
+**{included_ids_heading}**
 {included_ids}
 
 **Updated files**
 {files_preview}
 
-**Skipped Vulnerabilities In This Group**
+**{skipped_heading}**
 {skipped_lines}
 
 The full generated patch was omitted from the PR body to satisfy GitHub's maximum body length limit. Review the branch diff in the PR Files changed tab for the complete remediation patch.
@@ -978,6 +1051,7 @@ def run() -> None:
     severity_strings = configured_severity_strings()
     allowed_severities = configured_allowed_severities(severity_strings)
     min_severity_rank = min((severity_rank(severity) for severity in severity_strings), default=0)
+    pr_grouping_mode = configured_pr_grouping_mode()
     severity_source = "env" if raw_severity_strings is not None else "default"
     raw_severity_display = raw_severity_strings if raw_severity_strings is not None else "Critical"
     normalized_severity_display = ",".join(severity_strings) if severity_strings else "(none)"
@@ -985,6 +1059,7 @@ def run() -> None:
         f"Effective FOD_SEVERITY_STRINGS ({severity_source}): "
         f"raw='{raw_severity_display}' normalized='{normalized_severity_display}'"
     )
+    print(f"Effective FOD_PR_GROUPING: {pr_grouping_mode}")
     raw_vulns = client.iter_vulnerabilities(
         fortify_aviator=True,
         severity_strings=severity_strings,
@@ -997,7 +1072,7 @@ def run() -> None:
     )
 
     decisions: List[Dict[str, Any]] = []
-    grouped_candidates: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+    grouped_candidates: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = {}
     metrics_records: Dict[str, Dict[str, Any]] = {}
 
     for raw_vuln in raw_vulns:
@@ -1056,7 +1131,7 @@ def run() -> None:
 
         metrics_records[vuln_id]["eligible"] = True
         metrics_records[vuln_id]["outcome"] = "eligible"
-        grouped_candidates.setdefault(remediation_group_key(vuln), []).append(
+        grouped_candidates.setdefault(remediation_batch_key(vuln, pr_grouping_mode), []).append(
             {
                 "vuln": vuln,
                 "guidance": guidance,
@@ -1064,17 +1139,26 @@ def run() -> None:
             }
         )
 
-    for (severity, category), candidates in grouped_candidates.items():
-        branch_name = remediation_group_branch_name(severity, category)
-        commit_message = f"fix: Fortify Aviator remediations for {severity} {category}"
-        title = remediation_group_title(severity, category)
+    for _, candidates in grouped_candidates.items():
+        batch_vulns = [candidate["vuln"] for candidate in candidates]
+        severity, category = remediation_group_key(batch_vulns[0])
+        branch_name = remediation_batch_branch_name(batch_vulns, pr_grouping_mode)
+        title = remediation_batch_title(batch_vulns, pr_grouping_mode)
+        if pr_grouping_mode == "category":
+            commit_message = f"fix: Fortify Aviator remediations for {severity} {category}"
+        else:
+            commit_message = f"fix: Fortify Aviator remediation for vulnerability {batch_vulns[0]['vuln_id']}"
         included_vulns: List[Dict[str, Any]] = []
         guidance_by_vuln_id: Dict[str, AviatorGuidance] = {}
         exploitability_by_vuln_id: Dict[str, float] = {}
         skipped_vulns: List[Dict[str, str]] = []
 
         try:
-            with remediation_worktree(repo_root, base_branch, f"{severity}-{category}") as worktree_root:
+            with remediation_worktree(
+                repo_root,
+                base_branch,
+                remediation_batch_worktree_name(batch_vulns, pr_grouping_mode),
+            ) as worktree_root:
                 applied_files: List[str] = []
 
                 for candidate in candidates:
@@ -1128,7 +1212,7 @@ def run() -> None:
 
                 all_diffs = git_diff_for_files(worktree_root, unique_applied_files)
                 if not all_diffs:
-                    raise RuntimeError(f"No grouped diff produced for {severity} / {category}")
+                    raise RuntimeError(f"No remediation diff produced for {severity} / {category}")
 
                 validate_remediation_changes(worktree_root, unique_applied_files)
                 create_branch_and_commit(worktree_root, branch_name, commit_message, unique_applied_files)
@@ -1139,6 +1223,7 @@ def run() -> None:
                 exploitability_by_vuln_id,
                 all_diffs,
                 skipped_vulns,
+                pr_grouping_mode,
             )
             pull_request = open_pull_request(
                 repo=repo,
