@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       fod_release:
-        description: Optional FoD release override. Defaults to the FOD_RELEASE repository variable or repo:branch.
+        description: Optional FoD release override. Defaults to the FOD_RELEASE repository variable or owner/repo:branch.
         required: false
         default: ""
 
@@ -31,14 +31,22 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Run Fortify AST Scan
+      - name: Run Fortify AST Scan with SCA and Aviator
         uses: ./fod-scan
         with:
           fod-url: ${{ vars.FOD_URL || 'https://ams.fortify.com' }}
           fod-client-id: ${{ secrets.FOD_CLIENT_ID }}
           fod-client-secret: ${{ secrets.FOD_CLIENT_SECRET }}
           fod-tenant: ${{ secrets.FOD_TENANT }}
-          fod-release: ${{ github.event.inputs.fod_release || vars.FOD_RELEASE || format('{0}:{1}', github.event.repository.name, github.head_ref || github.ref_name) }}
+          fod-release: ${{ github.event.inputs.fod_release || vars.FOD_RELEASE || format('{0}:{1}', github.repository, github.head_ref || github.ref_name) }}
+          do-setup: ${{ vars.FOD_DO_SETUP || 'true' }}
+          fod-app-owner: ${{ vars.FOD_APP_OWNER || '' }}
+          auto-required-attrs: ${{ vars.FOD_AUTO_REQUIRED_ATTRS || 'false' }}
+          copy-from-release: ${{ vars.FOD_COPY_FROM_RELEASE || format('{0}:{1}', github.repository, github.event.repository.default_branch) }}
+          sast-assessment-type: ${{ vars.FOD_SAST_ASSESSMENT_TYPE || '' }}
+          do-aviator-audit: ${{ vars.FOD_DO_AVIATOR_AUDIT || 'true' }}
+          override-sast-settings: ${{ vars.FOD_OVERRIDE_SAST_SETTINGS || 'false' }}
+          setup-extra-opts: ${{ vars.FOD_SETUP_EXTRA_OPTS || '' }}
           package-extra-opts: ${{ vars.FOD_PACKAGE_EXTRA_OPTS || '' }}
           fcli-bootstrap-version: ${{ vars.FCLI_BOOTSTRAP_VERSION || '' }}
           do-wait: ${{ vars.FOD_DO_WAIT || 'true' }}

@@ -4,6 +4,7 @@ Reusable GitHub Action repository for Fortify on Demand scanning and Aviator rem
 
 It is designed to:
 - run Fortify on Demand scans through a reusable wrapper around the Fortify AST Scan marketplace action, `fortify/github-action@v3`
+- create FoD applications and releases automatically when configured to do so
 - authenticate to Fortify on Demand
 - fetch vulnerabilities for a configured release
 - request Aviator remediation guidance per finding
@@ -69,6 +70,14 @@ Optional repository secrets:
 Useful repository variables:
 - `FOD_URL`
 - `FOD_RELEASE`
+- `FOD_DO_SETUP`
+- `FOD_APP_OWNER`
+- `FOD_AUTO_REQUIRED_ATTRS`
+- `FOD_COPY_FROM_RELEASE`
+- `FOD_SAST_ASSESSMENT_TYPE`
+- `FOD_DO_AVIATOR_AUDIT`
+- `FOD_OVERRIDE_SAST_SETTINGS`
+- `FOD_SETUP_EXTRA_OPTS`
 - `FOD_PACKAGE_EXTRA_OPTS`
 - `FCLI_BOOTSTRAP_VERSION`
 - `FOD_DO_WAIT`
@@ -76,7 +85,14 @@ Useful repository variables:
 - `FOD_DO_EXPORT`
 - `FOD_DO_SCA_SCAN`
 
-If `FOD_RELEASE` is not set, the workflow falls back to `repo:branch`, which mirrors the default behavior documented for the Fortify AST Scan action.
+Default workflow behavior:
+- If `FOD_RELEASE` is not set, the workflow falls back to `owner/repo:branch`.
+- `FOD_DO_SETUP` defaults to `true`, so the workflow will attempt to create the FoD application and release automatically.
+- `FOD_DO_SCA_SCAN` defaults to `true`, enabling Software Composition Analysis together with SAST.
+- `FOD_DO_AVIATOR_AUDIT` defaults to `true`, enabling Aviator audits when your FoD tenant and policy support it.
+- `FOD_COPY_FROM_RELEASE` defaults to `owner/repo:default-branch`, so newly created branch releases can inherit baseline state from the default branch release.
+
+If you authenticate with FoD client credentials and automatic application creation is enabled, set `FOD_APP_OWNER` if your tenant requires an explicit application owner during creation. This requirement is called out in the Fortify GitHub Action documentation.
 
 ## Quick Start
 
@@ -122,6 +138,14 @@ The scan action is published from the `fod-scan/` subdirectory. It wraps the For
 | `fod-tenant` | No | `""` | Fortify tenant name. |
 | `fod-release` | Yes, unless `fod-release-id` is set | `""` | Preferred FoD release selector for the underlying `FOD_RELEASE` environment variable. This can be a numeric release id or a release name like `MyApp:main`. |
 | `fod-release-id` | Yes, unless `fod-release` is set | `""` | Backward-compatible alias for `fod-release`. Useful for existing workflows that already pass a numeric release id. |
+| `do-setup` | No | `false` | Whether the FoD application and release should be created automatically and SAST setup should be configured if missing. |
+| `fod-app-owner` | No | `""` | Optional application owner for automatic FoD application creation. This may be required when authenticating with client credentials. |
+| `auto-required-attrs` | No | `false` | Whether automatic FoD setup should try to fill required application and release attributes with default values. |
+| `copy-from-release` | No | `""` | Optional FoD release to copy state from when creating a new release. |
+| `sast-assessment-type` | No | `""` | Optional FoD SAST assessment type to apply during automatic setup. |
+| `do-aviator-audit` | No | `false` | Whether automatic FoD SAST setup should enable Aviator audits. |
+| `override-sast-settings` | No | `false` | Whether automatic FoD setup should overwrite existing SAST settings instead of only filling them when missing. |
+| `setup-extra-opts` | No | `""` | Additional raw options to pass to the FoD `setup-release` action. |
 | `package-extra-opts` | No | `""` | Optional packaging options, for example `-bt mvn`, `-bt gradle`, or other Fortify packaging flags. |
 | `fcli-bootstrap-version` | No | `""` | Optional fcli bootstrap version, for example `v3.15.0`, if you want to pin the Fortify AST Scan runtime instead of floating with the latest supported v3 release. |
 | `do-wait` | No | `false` | Whether the scan should wait for FoD processing to finish. |
@@ -131,6 +155,7 @@ The scan action is published from the `fod-scan/` subdirectory. It wraps the For
 | `do-pr-comment` | No | `false` | Whether the Fortify action should comment on PRs. |
 
 This wrapper maps `fod-release` or `fod-release-id` to the official `FOD_RELEASE` environment variable expected by the Fortify AST Scan action.
+It also exposes the official FoD setup knobs documented by Fortify, including automatic release creation (`DO_SETUP`), baseline copying (`COPY_FROM_RELEASE`), SCA enablement (`DO_SCA_SCAN`), and Aviator enablement (`DO_AVIATOR_AUDIT`).
 
 ### Minimal Scan Example
 
@@ -143,7 +168,7 @@ This wrapper maps `fod-release` or `fod-release-id` to the official `FOD_RELEASE
     fod-release: ${{ secrets.FOD_RELEASE_ID }}
 ```
 
-### Scan Example With Java Packaging
+### Scan Example With Automatic FoD Setup, SCA, and Aviator
 
 ```yaml
 - uses: actions/setup-java@v4
@@ -156,10 +181,15 @@ This wrapper maps `fod-release` or `fod-release-id` to the official `FOD_RELEASE
   with:
     fod-client-id: ${{ secrets.FOD_CLIENT_ID }}
     fod-client-secret: ${{ secrets.FOD_CLIENT_SECRET }}
-    fod-release: ${{ secrets.FOD_RELEASE_ID }}
+    fod-release: ${{ vars.FOD_RELEASE || format('{0}:{1}', github.repository, github.ref_name) }}
+    do-setup: "true"
+    fod-app-owner: ${{ vars.FOD_APP_OWNER }}
+    copy-from-release: ${{ vars.FOD_COPY_FROM_RELEASE || format('{0}:{1}', github.repository, github.event.repository.default_branch) }}
+    do-aviator-audit: "true"
+    do-sca-scan: "true"
     package-extra-opts: "-bt mvn"
     fcli-bootstrap-version: "v3.15.0"
-    do-sca-scan: "true"
+    do-wait: "true"
 ```
 
 ### Local Path Usage For The Scan Action
