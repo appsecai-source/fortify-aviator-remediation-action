@@ -1,8 +1,9 @@
-# Fortify Aviator Remediation Action
+# Fortify FoD Scan And Aviator Remediation Actions
 
-Reusable GitHub Action that pulls Fortify on Demand findings for a release, requests Aviator remediation guidance, applies safe patches in the checked-out repository, and opens remediation pull requests.
+Reusable GitHub Action repository for Fortify on Demand scanning and Aviator remediation.
 
 It is designed to:
+- run Fortify on Demand scans through a reusable wrapper around `fortify/github-action`
 - authenticate to Fortify on Demand
 - fetch vulnerabilities for a configured release
 - request Aviator remediation guidance per finding
@@ -15,11 +16,19 @@ This folder is self-contained enough to be moved into its own repository. If you
 
 ## What You Get
 
-- Composite action entry point in `action.yml`
+- Root remediation action in `action.yml`
+- Fortify FoD scan action in `fod-scan/action.yml`
 - Remediation engine in `app/remediation_engine.py`
 - Fortify client and guidance parser in `app/fod_aviator.py`
 - Metrics and summaries in `app/metrics.py`
 - Wrapper scripts in `scripts/`
+
+## Actions In This Repository
+
+| Path | Purpose | Example `uses:` value |
+| --- | --- | --- |
+| repository root | Aviator remediation action | `your-org/fortify-aviator-remediation-action@v1` |
+| `fod-scan/` | Fortify FoD scan wrapper action | `your-org/fortify-aviator-remediation-action/fod-scan@v1` |
 
 ## Requirements
 
@@ -75,6 +84,66 @@ jobs:
 ```
 
 By default, the action does not assume any application language or build tool. Validation is off unless you pass a project-specific command.
+
+## Fortify FoD Scan Action
+
+The scan action is published from the `fod-scan/` subdirectory. It wraps `fortify/github-action@v3` with a smaller, reusable input surface.
+
+### Scan Inputs
+
+| Input | Required | Default | Description |
+| --- | --- | --- | --- |
+| `fod-url` | No | `https://ams.fortify.com` | Fortify on Demand URL used by the scan action. |
+| `fod-client-id` | Yes | - | Fortify on Demand client ID. |
+| `fod-client-secret` | Yes | - | Fortify on Demand client secret. |
+| `fod-tenant` | No | `""` | Fortify tenant name. |
+| `fod-release-id` | Yes | - | Numeric Fortify release identifier. |
+| `package-extra-opts` | No | `""` | Optional packaging options, for example `-bt mvn`, `-bt gradle`, or other Fortify packaging flags. |
+| `do-wait` | No | `false` | Whether the scan should wait for FoD processing to finish. |
+| `do-job-summary` | No | `false` | Whether the Fortify action should publish a job summary. |
+| `do-export` | No | `false` | Whether to export findings to GitHub code scanning. |
+| `do-sca-scan` | No | `true` | Whether to include software composition analysis. |
+| `do-pr-comment` | No | `false` | Whether the Fortify action should comment on PRs. |
+
+### Minimal Scan Example
+
+```yaml
+- name: Run Fortify FoD scan
+  uses: your-org/fortify-aviator-remediation-action/fod-scan@v1
+  with:
+    fod-client-id: ${{ secrets.FOD_CLIENT_ID }}
+    fod-client-secret: ${{ secrets.FOD_CLIENT_SECRET }}
+    fod-release-id: ${{ secrets.FOD_RELEASE_ID }}
+```
+
+### Scan Example With Java Packaging
+
+```yaml
+- uses: actions/setup-java@v4
+  with:
+    distribution: temurin
+    java-version: "17"
+
+- name: Run FoD scan for a Maven project
+  uses: your-org/fortify-aviator-remediation-action/fod-scan@v1
+  with:
+    fod-client-id: ${{ secrets.FOD_CLIENT_ID }}
+    fod-client-secret: ${{ secrets.FOD_CLIENT_SECRET }}
+    fod-release-id: ${{ secrets.FOD_RELEASE_ID }}
+    package-extra-opts: "-bt mvn"
+    do-sca-scan: "true"
+```
+
+### Local Path Usage For The Scan Action
+
+```yaml
+- name: Run local FoD scan action
+  uses: ./fod-scan
+  with:
+    fod-client-id: ${{ secrets.FOD_CLIENT_ID }}
+    fod-client-secret: ${{ secrets.FOD_CLIENT_SECRET }}
+    fod-release-id: ${{ secrets.FOD_RELEASE_ID }}
+```
 
 ## Inputs
 
@@ -333,6 +402,58 @@ This is how the bundled Security Shepherd workflow consumes the action:
     java-version: "8"
 ```
 
+### Combined Scan Then Remediate
+
+```yaml
+jobs:
+  fortify-fod:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Run FoD scan
+        uses: your-org/fortify-aviator-remediation-action/fod-scan@v1
+        with:
+          fod-client-id: ${{ secrets.FOD_CLIENT_ID }}
+          fod-client-secret: ${{ secrets.FOD_CLIENT_SECRET }}
+          fod-release-id: ${{ secrets.FOD_RELEASE_ID }}
+          package-extra-opts: "-bt mvn"
+          do-pr-comment: ${{ github.event_name == 'pull_request' }}
+
+  fortify-aviator-remediation:
+    needs: fortify-fod
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run remediation
+        uses: your-org/fortify-aviator-remediation-action@v1
+        with:
+          fod-client-id: ${{ secrets.FOD_CLIENT_ID }}
+          fod-client-secret: ${{ secrets.FOD_CLIENT_SECRET }}
+          fod-release-id: ${{ secrets.FOD_RELEASE_ID }}
+          github-token: ${{ secrets.REMEDIATION_GITHUB_TOKEN || github.token }}
+          remediation-validate-command: "mvn -q -DskipTests compile"
+          setup-java: "true"
+```
+
 ## Local Development
 
 Example local run:
@@ -373,6 +494,7 @@ REMEDIATION_VALIDATE_COMMAND=false
 
 ## Notes
 
+- This repository now contains two actions: a FoD scan wrapper in `fod-scan/` and the Aviator remediation action at the repository root.
 - The action prefers FoD client credentials and release id inputs.
 - The default grouping mode is `category`.
 - The default validation mode is disabled so the action stays language-neutral out of the box.

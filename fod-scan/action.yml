@@ -1,0 +1,67 @@
+name: Fortify FoD Scan
+description: Run the Fortify on Demand scan action with a reusable, project-neutral wrapper.
+
+inputs:
+  fod-url:
+    description: Fortify on Demand URL used by fortify/github-action.
+    required: false
+    default: https://ams.fortify.com
+  fod-client-id:
+    description: Fortify on Demand client ID.
+    required: true
+  fod-client-secret:
+    description: Fortify on Demand client secret.
+    required: true
+  fod-tenant:
+    description: Fortify tenant name.
+    required: false
+    default: ""
+  fod-release-id:
+    description: Numeric Fortify release identifier.
+    required: true
+  package-extra-opts:
+    description: Optional Fortify packaging options such as build tool selectors.
+    required: false
+    default: ""
+  do-wait:
+    description: Whether the scan action should wait for FoD processing to finish.
+    required: false
+    default: "false"
+  do-job-summary:
+    description: Whether the Fortify action should write a job summary.
+    required: false
+    default: "false"
+  do-export:
+    description: Whether to export scan results to GitHub code scanning.
+    required: false
+    default: "false"
+  do-sca-scan:
+    description: Whether to include software composition analysis.
+    required: false
+    default: "true"
+  do-pr-comment:
+    description: Whether the Fortify action should comment on pull requests.
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Run Fortify on Demand scan
+      uses: fortify/github-action@v3
+      env:
+        FOD_URL: ${{ inputs.fod-url }}
+        FOD_CLIENT_ID: ${{ inputs.fod-client-id }}
+        FOD_CLIENT_SECRET: ${{ inputs.fod-client-secret }}
+        FOD_TENANT: ${{ inputs.fod-tenant }}
+        FOD_RELEASE: ${{ inputs.fod-release-id }}
+        PACKAGE_EXTRA_OPTS: ${{ inputs.package-extra-opts }}
+        DO_WAIT: ${{ inputs.do-wait }}
+        DO_JOB_SUMMARY: ${{ inputs.do-job-summary }}
+        DO_EXPORT: ${{ inputs.do-export }}
+        DO_SCA_SCAN: ${{ inputs.do-sca-scan }}
+        DO_PR_COMMENT: ${{ inputs.do-pr-comment }}
+
+branding:
+  icon: shield
+  color: blue
