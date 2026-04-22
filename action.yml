@@ -59,7 +59,7 @@ inputs:
     required: false
     default: ""
   remediation-validate-command:
-    description: Optional project-specific validation command run before publishing remediation changes. Examples: mvn test, npm test, pytest -q, dotnet build. Set to false/off/none to disable.
+    description: "Optional project-specific validation command run before publishing remediation changes. Examples: mvn test, npm test, pytest -q, dotnet build. Set to false/off/none to disable."
     required: false
     default: "false"
   git-user-name:
